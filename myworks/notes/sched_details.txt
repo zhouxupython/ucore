@@ -1,0 +1,639 @@
+
+spin
+
+int
+main(void) {
+    int pid, ret;
+    cprintf("[pid:%d]I am the parent. Forking the child...\n", getpid());
+    if ((pid = fork()) == 0) {
+        cprintf("[pid:%d]I am the child. spinning ...\n", getpid());
+        while (1);
+    }
+    cprintf("[pid:%d]I am the parent. Running the child...\n", getpid());
+
+    yield();
+    yield();
+    yield();
+
+    cprintf("[pid:%d]I am the parent.  Killing the child...\n", getpid());
+
+    assert((ret = kill(pid)) == 0);
+    cprintf("[pid:%d]kill returns %d\n", getpid(), ret);
+
+    assert((ret = waitpid(pid, NULL)) == 0);
+    cprintf("[pid:%d]wait returns %d\n", getpid(), ret);
+
+    cprintf("[pid:%d]spin may pass.\n", getpid());
+    return 0;
+}
+
+注意：每一次tick时均会引起 定时器中断
+触发 trap   trap_dispatch   case IRQ_OFFSET + IRQ_TIMER:
+
+[time-sequence]
+3rd                                                     4th
+3rd调度运行，执行fork
+fork系统调用
+sys_fork
+do_fork
+do_fork创建一个半成品4th，和3rd基本一样，所谓的“返回地址”也一样
+（应该是从3rd调用fork触发 int指令的下一句汇编指令开始执行）
+do_fork最后调用wakeup_proc设置4th为PROC_RUNNABLE
+依次返回sys_fork  syscall  3rd：trap_dispatch
+最后回到 3rd：trap(!)调用 3rd：trap_dispatch的下一句
+进入 3rd：trap(!) if (!in_kernel)
+不进入         if (3rd->flags & PF_EXITING)
+不进入     if (3rd->need_resched)
+退出3rd：trap(!) 
+退出到 __trapret
+返回到用户空间（注2），结束fork系统调用
+
+因为3rd的fork返回值不为0，
+3rd执行打印，然后
+3rd执行yield系统调用
+进入3rd：trap(!)---》3rd：trap_dispatch
+将3rd->need_resched置为1
+退出yield系统调用
+依次返回sys_yield  syscall  3rd：trap_dispatch
+最后回到 3rd：trap(!)调用 3rd：trap_dispatch的下一句
+进入 3rd：trap(!) if (!in_kernel)
+不进入         if (3rd->flags & PF_EXITING)
+进入      if (3rd->need_resched)  
+schedule ---》 proc_run
+            ---------------------------------------》   4th开始第一次执行
+                                                        forkret...
+                                                        forkrets:
+                                                        __trapret:（注4）
+                                                        返回用户空间，4th完全创建好了
+                                                        可以在用户空间执行了
+                                                        4th设置了与3rd：fork一样的返回地址，但返回值是0
+                                                        会执行if ( == 0)分支
+                                                        打印，然后执行
+                                                        while(1)...
+                                                        某次tick时，进入4th：trap(!)---》4th：trap_dispatch
+                                                        此次tick将到达整百ticks数
+                                                        进入if (ticks % TICK_NUM == 0)
+                                                        打印，将4th->need_resched置为1
+                                                        退出4th：trap_dispatch
+                                                        会进入4th：trap(!) if (!in_kernel)
+                                                        不进入         if (4th->flags & PF_EXITING)
+                                                        进入          if (4th->need_resched)
+            《---------------------------------------    proc_run 《----  schedule                                    
+从proc_run 退出，回到schedule
+返回到 3rd：trap(!) 
+退出到 __trapret
+返回到用户空间（注2），结束yield系统调用
+
+3rd执行yield系统调用
+进入3rd：trap(!)---》3rd：trap_dispatch
+将3rd->need_resched置为1
+退出yield系统调用
+依次返回sys_yield  syscall  3rd：trap_dispatch
+最后回到 3rd：trap(!)调用 3rd：trap_dispatch的下一句
+进入 3rd：trap(!) if (!in_kernel)
+不进入         if (3rd->flags & PF_EXITING)
+进入          if (3rd->need_resched)  
+schedule ---》 proc_run                                                      
+            ---------------------------------------》                                            
+                                                        从proc_run 退出，回到schedule
+                                                        然后从4th：trap(!)中退出
+                                                        继续执行 while(1)...    （注1）
+                                                        某次tick时，进入4th：trap(!)---》4th：trap_dispatch
+                                                        此次tick将到达整百ticks数
+                                                        进入if (ticks % TICK_NUM == 0)
+                                                        打印，将4th->need_resched置为1
+                                                        退出4th：trap_dispatch
+                                                        会进入4th：trap(!) if (!in_kernel)
+                                                        不进入         if (4th->flags & PF_EXITING)
+                                                        进入          if (4th->need_resched)
+            《---------------------------------------    proc_run 《----  schedule                                    
+从proc_run 退出，回到schedule
+返回到 3rd：trap(!) 
+退出到 __trapret
+返回到用户空间（注2），结束yield系统调用
+            
+3rd执行yield系统调用
+进入3rd：trap(!)---》3rd：trap_dispatch
+将3rd->need_resched置为1
+退出yield系统调用
+依次返回sys_yield  syscall  3rd：trap_dispatch
+最后回到 3rd：trap(!)调用 3rd：trap_dispatch的下一句
+进入 3rd：trap(!) if (!in_kernel)
+不进入         if (3rd->flags & PF_EXITING)
+进入          if (3rd->need_resched)  
+schedule ---》 proc_run                                                          
+            ---------------------------------------》                        
+                                                        从proc_run 退出，回到schedule
+                                                        然后从4th：trap(!)中退出
+                                                        继续执行 while(1)...    （注1）
+                                                        某次tick时，进入4th：trap(!)---》4th：trap_dispatch
+                                                        此次tick将到达整百ticks数
+                                                        进入if (ticks % TICK_NUM == 0)
+                                                        打印，将4th->need_resched置为1
+                                                        退出4th：trap_dispatch
+                                                        会进入4th：trap(!) if (!in_kernel)
+                                                        不进入         if (4th->flags & PF_EXITING)
+                                                        进入          if (4th->need_resched)
+            《---------------------------------------    proc_run 《----  schedule                                                        
+从proc_run 退出，回到schedule
+返回到 3rd：trap(!) 
+退出到 __trapret
+返回到用户空间（注2），结束yield系统调用
+  
+打印                                                      
+kill(4th)系统调用
+进入3rd：trap(!)---》3rd：trap_dispatch
+进入do_kill
+4th置上PF_EXITING
+退出do_kill  ---》3rd：trap_dispatch
+返回3rd：trap(!)调用 3rd：trap_dispatch的下一句
+进入 3rd：trap(!) if (!in_kernel)
+不进入         if (3rd->flags & PF_EXITING)
+不进入     if (3rd->need_resched)
+退出3rd：trap(!) 
+退出到 __trapret
+返回到用户空间（注2），结束kill系统调用
+
+waitpid(4th)系统调用
+进入3rd：trap(!)---》3rd：trap_dispatch
+进入do_wait(!)
+进入if (haskid) 分支
+将3rd设置为 PROC_SLEEPING WT_CHILD
+schedule---》proc_run  
+            ---------------------------------------》
+                                                        从proc_run 退出，回到schedule
+                                                        然后从4th：trap(!)中退出
+                                                        继续执行 while(1)...    （注1）
+                                                        下一次tick时（！！！），进入4th：trap(!)---》4th：trap_dispatch
+                                                        不一定是整百的ticks
+                                                        退出4th：trap_dispatch
+                                                        会进入4th：trap(!) if (!in_kernel)
+                                                        3rd中执行kill(4th)时， 4th已经置上PF_EXITING
+                                                        所以会进入   if (4th->flags & PF_EXITING)
+                                                        执行 do_exit(-E_KILLED);
+                                                        在do_exit中，会清除4th的mm
+                                                        置4th 为 PROC_ZOMBIE，和error_code
+                                                        将4th的parent，也就是3rd执行 wakeup
+                                                        （3rd在自己调用do_wait时已经置为了PROC_SLEEPING WT_CHILD）
+                                                        wakeup后，置为PROC_RUNNABLE，清除WT_CHILD
+                                                        proc_run 《----  do_exit：schedule   
+            《---------------------------------------            
+从proc_run 退出，回到schedule
+回到do_wait(!)
+回到if (haskid) 分支，继续执行   
+返回到repeat:
+在上面4th执行do_exit时，
+已经设置为 PROC_ZOMBIE
+所以找到4th
+进入found:
+继续销毁4th，4th彻底不存在了
+do_wait(!)返回
+依次返回sys_wait  syscall  3rd：trap_dispatch
+最后回到 3rd：trap(!)调用 3rd：trap_dispatch的下一句
+进入 3rd：trap(!) if (!in_kernel)
+不进入         if (3rd->flags & PF_EXITING)
+不进入     if (3rd->need_resched)
+退出3rd：trap(!) 
+退出到 __trapret
+返回到用户空间（注2），结束waitpid系统调用
+
+
+
+
+
+
+zx
+
+int main(void) {
+    int pid, exit_code;
+    cprintf("[pid:%d]I am the parent. Forking the child...\n", getpid());
+    if ((pid = fork()) == 0)
+    {
+        cprintf("[pid:%d]I am the child. exit\n", getpid());
+        exit(0xbeaf);
+    }
+    else
+    {
+        cprintf("[pid:%d]I am the parent. Running the child...\n", getpid());
+        int ret = waitpid(pid, &exit_code);
+        cprintf("[pid:%d]wait returns %d\n", getpid(), ret);
+    }
+
+    cprintf("[pid:%d]zx may pass.\n", getpid());
+    return 0;
+}
+
+[time-sequence]
+3rd                                                                     4th
+
+fork系统调用
+sys_fork
+do_fork
+do_fork创建一个半成品4th，和3rd基本一样，所谓的“返回地址”也一样
+（应该是从3rd调用fork触发 int指令的下一句汇编指令开始执行）
+do_fork最后调用wakeup_proc设置4th为PROC_RUNNABLE
+依次返回sys_fork  syscall  3rd：trap_dispatch
+最后回到 3rd：trap(!)调用 3rd：trap_dispatch的下一句
+进入 3rd：trap(!) if (!in_kernel)
+不进入         if (3rd->flags & PF_EXITING)
+不进入     if (3rd->need_resched)
+退出3rd：trap(!) 
+退出到 __trapret
+返回到用户空间（注2），结束fork系统调用
+
+3rd的fork返回值不为0，执行waitpid
+waitpid(4th)系统调用
+进入3rd：trap(!)---》3rd：trap_dispatch
+进入do_wait(!)
+进入if (haskid) 分支
+将3rd设置为 PROC_SLEEPING WT_CHILD
+schedule---》proc_run
+                            ---------------------------------------》   
+                                                                        4th开始第一次执行
+                                                                        forkret...（注3）
+                                                                        forkrets:
+                                                                        __trapret:（注4）
+                                                                        返回用户空间，4th完全创建好了
+                                                                        可以在用户空间执行了
+                                                                        4th设置了与3rd：fork一样的返回地址，但返回值是0
+                                                                        会执行if ( == 0)分支
+                                                                        打印
+                                                                        执行exit系统调用
+                                                                        进入4th：trap 4th：trap_dispatch
+                                                                        执行do_exit
+                                                                        在do_exit中，会清除4th的mm
+                                                                        置4th 为 PROC_ZOMBIE，和error_code
+                                                                        将4th的parent，也就是3rd执行 wakeup
+                                                                        （3rd在自己调用do_wait时已经置为了PROC_SLEEPING WT_CHILD）
+                                                                        wakeup后，置为PROC_RUNNABLE，清除WT_CHILD
+                                                                        proc_run 《----  do_exit：schedule  
+                            《---------------------------------------                                                                        
+从proc_run 退出，回到schedule
+回到do_wait(!) 
+回到if (haskid) 分支，继续执行                                                                          
+返回到repeat:
+在上面4th执行do_exit时，
+已经设置为 PROC_ZOMBIE
+所以找到4th
+进入found:
+继续销毁4th，4th彻底不存在了
+（所以4th也无法结束exit系统调用返回用户空间了）
+do_wait(!)返回
+依次返回sys_wait  syscall  3rd：trap_dispatch
+最后回到 3rd：trap(!)调用 3rd：trap_dispatch的下一句
+进入 3rd：trap(!) if (!in_kernel)
+不进入         if (3rd->flags & PF_EXITING)
+不进入     if (3rd->need_resched)
+退出3rd：trap(!) 
+退出到 __trapret
+返回到用户空间（注2），结束waitpid系统调用
+打印
+
+
+
+
+
+
+-------------
+
+trap的讨论
+
+trap_in_kernel(struct trapframe *tf) {
+    return (tf->tf_cs == (uint16_t)KERNEL_CS);
+}
+
+void
+trap(struct trapframe *tf) {
+    // dispatch based on what type of trap occurred
+    // used for previous projects
+    if (current == NULL) {
+        trap_dispatch(tf);
+    }
+    else {
+        // keep a trapframe chain in stack
+        struct trapframe *otf = current->tf;
+        current->tf = tf;
+    
+        bool in_kernel = trap_in_kernel(tf);
+    
+        trap_dispatch(tf);
+    
+        current->tf = otf;
+        if (!in_kernel) {
+            if (current->flags & PF_EXITING) {
+                do_exit(-E_KILLED);
+            }
+            if (current->need_resched) {
+                schedule();
+            }
+        }
+    }
+}
+
+（一）中断发生时，trap函数中对 trap_in_kernel的判断
+判断是否处于用户上下文和 内核上下文
+中断发生时，cpu会自动压入 一组寄存器 {[ss esp |] eflags | cs eip}
+以及利用汇编代码压入其他的一些寄存器，
+这些都作为trapframe，以保存现场环境，用于将来恢复被打断的程序继续执行
+
+当调用中断服务例程trap时，这些压入的寄存器值，又可以作为trap函数的入参，即struct trapframe tf
+当trap函数中，判断是否 in_kernel时，
+利用压入的tf_cs进行判断，中断发生时，是否是在内核上下文，还是用户上下文？
+所以就看中断发生时，到底是位于什么上下文了
+
+（1）如果是在用户态时进行了系统调用fork wait kill exit yield等，就处于用户上下文，不在内核中
+（2）如果是在用户进程执行时，发生了定时器中断，那么就任务是用户上下文
+（3）如果是在内核进程执行时，发生了缺页中断，那么就处于内核上下文中（？【Q】缺页验证）
+（4）如果是在内核进程执行时，发生了定时器中断，那么就任务是（？【Q】改造initproc加while(1)进行验证）
+
+（二）用户上下文发生中断时，执行完中断服务例程后，哪些会执行do_exit 和 schedule？
+用户上下文中断时，执行完中断服务例程后，就需要判断是否要执行：
+（1）do_exit
+（
+ 该进程被执行kill后，
+
+
+进入该分支）
+和 
+（2）schedule
+（
+ 时间片用完，timer超时。
+ 执行yield自己放弃cpu。
+ waitpid执行时有子进程且子进程不是僵尸进程。
+ 
+
+ 进入该分支）
+
+以及：
+（3）中断服务例程结束后，从trap直接返回用户空间的调用
+（
+ fork生成子进程。
+ waitpid入参指定的进程不存在或者没有权限。
+ waitpid入参指定的返回码内存异常。
+ waitpid执行时有子进程且子进程是僵尸进程，销毁僵尸进程后。
+ kill执行时，将指定的进程设置为PF_EXITING状态后。
+
+
+）
+
+
+（4）中断服务例程结束后，从trap永远不返回用户空间的调用
+（
+ exit执行时，释放一部分内存，将自己设置为僵尸进程，唤醒并切换到父进程，父进程彻底销毁子进程，所以子进程无法再调度回去了，就不会再回用户空间了。
+
+
+
+）
+
+
+（三）理解的时候，一定要注意上下文，到底是在谁的上下文中进行了操作。
+
+yield 自己让出cpu，与其他进程无关
+exit  自己退出，内部唤醒父进程，执行后基本上该进程就没了
+kill wait 自己去杀掉或者等待参数中指定的进程，关联到俩进程
+fork  自己去生成一个子进程，子进程号不确定，过程中指定
+timer 当前谁在运行，就是谁要被调度出去
+ 
+schedule到别人后，又再次schedule回来时，会回到之前schedule的地方，继续执行，就像没有发生切换一样。
+要牢牢抓住这一点进行理解【！！！】
+
+
+（四）wait系统调用
+当使用wait时，如果父进程有子进程，而且子进程不是僵尸进程，那么父进程就要让出cpu进行等待；
+此时重新调度，（可能）回到子进程，直到子进程结束后，（子进程可能会使用exit设置自己是僵尸进程，并进行调度）
+再次调度，从而（可能）再回到父进程，
+父进程重新检查子进程，发现子进程是僵尸进程，那么就销毁子进程，退出wait操作。
+
+
+
+（五）kill的设计真是很奇怪
+kill仅仅设置了指定进程的PF_EXITING状态，就返回用户空间了。
+为何这样设计
+需要在用户进程上下文，再下一个tick时，触发该进程执行do_exit ？？？
+而不是直接将该进程销毁
+
+【看看0.11的设计】
+
+
+
+（六）do_exit的使用讨论
+
+目前有两种方式会调用到do_exit
+
+（1）用户进程使用系统调用exit触发内核的do_exit函数
+这表示用户进程主动退出了
+
+（2）用户进程被别的进程kill后，再次调度到该用户进程时，会在该进程上下文的下一个tick中断时，调用do_exit函数，见（二）讨论
+这表示用户进程被动退出了
+
+
+
+
+（七）中断中schedule使用讨论
+中断（包括系统调用）执行后，均会在trap函数中检查中断是否发生在用户上下文中，
+如果是，就要检查是否要执行schedule
+
+【@】表示schedule
+【#】表示直接返回用户空间
+【x】表示进程不再存在了
+
+
+【@】表示schedule
+yield
+timer到期时间片用完
+waitpid时，pid正常，且pid表示的子进程不是僵尸进程
+
+【#】表示直接返回用户空间
+waitpid时，pid异常，找不到对应的进程
+waitpid时，error_code内存异常，不可读写
+waitpid时，pid正常，且pid表示的子进程是僵尸进程
+kill
+
+【x】表示进程不再存在了
+exit
+
+（1）yield
+
+3rd
+yield系统调用
+进入3rd：trap(!)---》3rd：trap_dispatch
+将3rd->need_resched置为1
+退出yield系统调用
+依次返回sys_yield  syscall  3rd：trap_dispatch
+最后回到 3rd：trap(!)调用 3rd：trap_dispatch的下一句
+进入 3rd：trap(!) if (!in_kernel)
+不进入         if (3rd->flags & PF_EXITING)
+进入      if (3rd->need_resched)  
+【@】schedule ---》 proc_run
+            -----------------------------------------------------------》调度到另一个进程
+
+
+3rd只是表示执行yield系统调用的用户进程，举例而已
+
+
+（2）timer到期，100ticks，时间片用完
+
+3rd
+某次tick时，进入4th：trap(!)---》4th：trap_dispatch
+此次tick将到达整百ticks数
+进入if (ticks % TICK_NUM == 0)
+打印，将4th->need_resched置为1
+退出4th：trap_dispatch
+会进入4th：trap(!) if (!in_kernel)
+不进入         if (4th->flags & PF_EXITING)
+进入          if (4th->need_resched)
+【@】schedule ---》 proc_run
+            -----------------------------------------------------------》调度到另一个进程                   
+
+
+
+（3）waitpid
+（3.1）pid异常
+
+3rd
+waitpid(4th)系统调用
+进入3rd：trap(!)---》3rd：trap_dispatch
+进入do_wait(!)
+find_proc失败
+return -E_BAD_PROC;
+返回3rd：trap_dispatch
+最后回到 3rd：trap(!)调用 3rd：trap_dispatch的下一句
+进入 3rd：trap(!) if (!in_kernel)
+不进入         if (3rd->flags & PF_EXITING)
+不进入     if (3rd->need_resched)
+退出3rd：trap(!) 
+退出到 __trapret
+【#】返回到用户空间，结束waitpid系统调用
+
+（3.2）error_code内存异常
+
+3rd
+waitpid(4th)系统调用
+进入3rd：trap(!)---》3rd：trap_dispatch
+进入do_wait(!)
+user_mem_check失败
+return -E_INVAL;
+返回3rd：trap_dispatch
+最后回到 3rd：trap(!)调用 3rd：trap_dispatch的下一句
+进入 3rd：trap(!) if (!in_kernel)
+不进入         if (3rd->flags & PF_EXITING)
+不进入     if (3rd->need_resched)
+退出3rd：trap(!) 
+退出到 __trapret
+【#】返回到用户空间，结束waitpid系统调用
+
+（3.3）pid正常，且pid表示的子进程是僵尸进程
+
+3rd
+waitpid(4th)系统调用
+进入3rd：trap(!)---》3rd：trap_dispatch
+进入do_wait(!)
+find_proc成功
+pid表示的子进程是僵尸进程
+goto found;
+销毁该子进程
+return 0;
+返回3rd：trap_dispatch
+最后回到 3rd：trap(!)调用 3rd：trap_dispatch的下一句
+进入 3rd：trap(!) if (!in_kernel)
+不进入         if (3rd->flags & PF_EXITING)
+不进入     if (3rd->need_resched)
+退出3rd：trap(!) 
+退出到 __trapret
+【#】返回到用户空间，结束waitpid系统调用
+
+（3.4）pid正常，且pid表示的子进程不是僵尸进程
+
+3rd
+waitpid(4th)系统调用
+进入3rd：trap(!)---》3rd：trap_dispatch
+进入do_wait(!)
+进入if (haskid) 分支
+将3rd设置为 PROC_SLEEPING WT_CHILD
+【@】schedule---》proc_run  
+            ---------------------------------------》
+                                                        某进程开始执行，然后某个时机切换出去
+                                                        也可能是子进程，子进程运行完毕后，执行exit
+                                                        执行完后，会再次调度
+                                                        proc_run 《----  schedule      
+            《---------------------------------------
+从proc_run 退出，回到schedule
+回到do_wait(!)
+回到if (haskid) 分支，继续执行
+可能会返回repeat：
+继续寻找子进程，此时找到的子进程可能是僵尸进程，
+也可能不是，是的话，就进入（3.3）                                                         
+
+
+注意：（3.4）肯定发生在（3.3）之前
+
+
+（4）exit
+
+4th
+执行exit系统调用
+进入4th：trap 4th：trap_dispatch
+执行do_exit
+在do_exit中，会清除4th的mm
+置4th 为 PROC_ZOMBIE，和error_code
+如果4th的parent，也就是3rd处于WT_CHILD状态，那么执行 wakeup
+（3rd在自己调用do_wait时已经置为了PROC_SLEEPING WT_CHILD）
+wakeup后，3rd置为PROC_RUNNABLE，清除WT_CHILD
+do_exit：schedule ---》proc_run 
+            ---------------------------------------》        
+                                                        如果调度的是父进程，那么父进程可能会进入repeat：
+                                                        找到这个僵尸进程，进行销毁，
+                                                        【x】那么就不可能再次调度回到4th了
+
+
+
+
+（5）kill
+
+3rd
+kill(4th)系统调用
+进入3rd：trap(!)---》3rd：trap_dispatch
+进入do_kill
+4th置上PF_EXITING
+退出do_kill  ---》3rd：trap_dispatch
+最后回到 3rd：trap(!)调用 3rd：trap_dispatch的下一句
+进入 3rd：trap(!) if (!in_kernel)
+不进入         if (3rd->flags & PF_EXITING)
+不进入     if (3rd->need_resched)
+退出3rd：trap(!) 
+退出到 __trapret
+【#】返回到用户空间，结束kill系统调用                                                   
+                                                        
+                                                        
+                                                        
+（6）fork
+
+3rd
+3rd调度运行，执行fork
+fork系统调用
+sys_fork
+do_fork
+do_fork创建一个半成品4th，和3rd基本一样，所谓的“返回地址”也一样
+（应该是从3rd调用fork触发 int指令的下一句汇编指令开始执行）
+do_fork最后调用wakeup_proc设置4th为PROC_RUNNABLE
+依次返回sys_fork  syscall  3rd：trap_dispatch
+最后回到 3rd：trap(!)调用 3rd：trap_dispatch的下一句
+进入 3rd：trap(!) if (!in_kernel)
+不进入         if (3rd->flags & PF_EXITING)
+不进入     if (3rd->need_resched)
+退出3rd：trap(!) 
+退出到 __trapret
+【#】返回到用户空间，结束fork系统调用                                                       
+                                                        
+                                                        
+                                                        
+                                                        
+                                                        
+                                                        
+                                                        
+                                                        
+                                                        
+                                                        
+                                                        
+                                                        
+                                                        
