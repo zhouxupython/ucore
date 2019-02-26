@@ -1,0 +1,1342 @@
+
+
+
+
+
+------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------
+
+
+lab5
+
+
+在tools/user.ld描述了用户程序的用户虚拟空间的执行入口虚拟地址：
+
+SECTIONS {
+    /* Load programs at this address: "." means the current address */
+    . = 0x800020;
+    
+    
+在tools/kernel.ld描述了操作系统的内核虚拟空间的起始入口虚拟地址：
+SECTIONS {
+    /* Load the kernel at this address: "." means the current address */
+    . = 0xC0100000;
+
+
+
+
+
+
+
+zx@zx:~/2019/00_OS/02_ucore/labs/lab5$ objdump -d obj/user/libs/umain.o |grep main
+obj/user/libs/umain.o:     file format elf32-i386
+00000000 <umain>:
+   6:   e8 fc ff ff ff          call   7 <umain+0x7>
+  14:   e8 fc ff ff ff          call   15 <umain+0x15>
+zx@zx:~/2019/00_OS/02_ucore/labs/lab5$
+
+
+
+
+
+
+
+
+------------------------------------------------------------
+
+
+
+
+
+--------
+运行过程中，打印了如下
+
+++ setup timer interrupts
+kernel_execve: pid = 2, name = "forktree".
+trapframe at 0xc038afb4
+  edi  0x00000000
+  esi  0xafffff88
+  ebp  0xafffff4c
+  oesp 0xc038afd4
+  ebx  0x00000000
+  edx  0xafffff68
+  ecx  0x00800333
+  eax  0x00000012
+  ds   0x----0023
+  es   0x----0023
+  fs   0x----0000
+  gs   0x----0000
+  trap 0x0000000d General Protection        http://ilinuxkernel.com/?p=1388 Linux内核报错“General protection fault”原因
+  err  0x00000402
+  eip  0x008001d3
+  cs   0x----001b
+  flag 0x00000202 IF,IOPL=0
+  esp  0xafffff20
+  ss   0x----0023
+unhandled trap.
+
+
+可见进入了 print_trapframe 函数，很多地方调用到了这个函数
+需要判断是从哪边进入的
+
+搜索打印的“unhandled trap.” 这句话，可以看到是
+trap_dispatch函数的 default 分支
+
+那么可以看到是触发了没有进行handle的中断，可能出问题了
+
+看看当前代码在什么位置？
+eip  0x008001d3
+
+objdump 可以看到
+
+zx@zx:~/2019/00_OS/02_ucore/labs/lab5$ objdump -d obj/__user_forktree.out |grep syscall
+0080018d <syscall>:
+  80018d:       55                      push   %ebp
+  80018e:       89 e5                   mov    %esp,%ebp
+
+  8001c1:       8b 55 d4                mov    -0x2c(%ebp),%edx
+  8001c4:       8b 4d d8                mov    -0x28(%ebp),%ecx
+  8001c7:       8b 5d dc                mov    -0x24(%ebp),%ebx
+  8001ca:       8b 7d e0                mov    -0x20(%ebp),%edi
+  8001cd:       8b 75 e4                mov    -0x1c(%ebp),%esi
+  8001d0:       8b 45 08                mov    0x8(%ebp),%eax
+  8001d3:       cd 80                   int    $0x80                    0x008001d3
+  8001d5:       89 45 ec                mov    %eax,-0x14(%ebp)
+  8001d8:       8b 45 ec                mov    -0x14(%ebp),%eax
+
+发现是在进行系统调用的时候出错了
+以exec为例子
+
+struct trapframe *tf = current->tf;
+（注意，在创建进程是，把进程的trapframe放在给进程的内核栈分配的空间的顶部）
+
+    int num = tf->tf_regs.reg_eax;
+    if (num >= 0 && num < NUM_SYSCALLS) {
+        if (syscalls[num] != NULL) {
+            arg[0] = tf->tf_regs.reg_edx;
+            arg[1] = tf->tf_regs.reg_ecx;
+            arg[2] = tf->tf_regs.reg_ebx;
+            arg[3] = tf->tf_regs.reg_edi;
+            arg[4] = tf->tf_regs.reg_esi;
+            tf->tf_regs.reg_eax = syscalls[num](arg);
+
+系统调用的结果存入 tf->tf_regs.reg_eax中，用于调用结束后返回给eax寄存器
+
+
+eax中存放的是系统调用号，此时可以看到 eax  0x00000012 即18，
+#define SYS_getpid          18
+
+可见从用户态进行了getpid的系统调用
+
+
+对照此时执行的forktree的代码
+
+void
+forktree(const char *cur) {
+    cprintf("%04x: I am '%s'\n", getpid(), cur);
+
+    forkchild(cur, '0');
+    forkchild(cur, '1');
+}
+
+int
+main(void) {
+    forktree("");
+    return 0;
+}
+
+main进入后，执行forktree，第一行先执行 getpid，再打印
+
+看log并没有打印出来这一句，那么也能肯定是getpid出错了。
+
+后来将 cprintf("%04x: I am '%s'\n", getpid(), cur); 改为 cprintf("%04x: I am no one\n", cur);
+执行时，又发生了同样的问题，不过eax  0x0000001e  为30， 即 SYS_putc
+从用户态开始的系统调用，都有问题了
+
+void
+syscall(void) {
+    struct trapframe *tf = current->tf;
+    uint32_t arg[5];
+    int num = tf->tf_regs.reg_eax;          SYS_exec
+    if (num >= 0 && num < NUM_SYSCALLS) {
+        if (syscalls[num] != NULL) {
+            arg[0] = tf->tf_regs.reg_edx;   name
+            arg[1] = tf->tf_regs.reg_ecx;   len
+            arg[2] = tf->tf_regs.reg_ebx;   binary
+            arg[3] = tf->tf_regs.reg_edi;   size
+            arg[4] = tf->tf_regs.reg_esi;   unused in sys_exec
+            tf->tf_regs.reg_eax = syscalls[num](arg);
+            return ;
+        }
+    }
+    print_trapframe(tf);
+    panic("undefined syscall %d, pid = %d, name = %s.\n",
+            num, current->pid, current->name);
+
+            
+            
+(gdb) p/x arg[0]
+$4 = 0xc010e572     
+(gdb) p/s ((char*)(arg[0]))
+$9 = 0xc010e572 "forktree"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+answer grade.sh bak
+default_check() {
+    pts=7
+    check_regexps "$@"
+
+    pts=3
+    quick_check 'check output'                                  \
+    'memory management: default_pmm_manager'                      \
+    'check_alloc_page() succeeded!'                             \
+    'check_pgdir() succeeded!'                                  \
+    'check_boot_pgdir() succeeded!'             \
+    'PDE(0e0) c0000000-f8000000 38000000 urw'                   \
+    '  |-- PTE(38000) c0000000-f8000000 38000000 -rw'           \
+    'PDE(001) fac00000-fb000000 00400000 -rw'                   \
+    '  |-- PTE(000e0) faf00000-fafe0000 000e0000 urw'           \
+    '  |-- PTE(00001) fafeb000-fafec000 00001000 -rw'       \
+    'check_slab() succeeded!'                   \
+    'check_vma_struct() succeeded!'                             \
+    'page fault at 0x00000100: K/W [no page found].'            \
+    'check_pgfault() succeeded!'                                \
+    'check_vmm() succeeded.'                    \
+    'page fault at 0x00001000: K/W [no page found].'            \
+    'page fault at 0x00002000: K/W [no page found].'            \
+    'page fault at 0x00003000: K/W [no page found].'            \
+    'page fault at 0x00004000: K/W [no page found].'            \
+    'write Virt Page e in fifo_check_swap'          \
+    'page fault at 0x00005000: K/W [no page found].'        \
+    'page fault at 0x00001000: K/W [no page found]'     \
+    'page fault at 0x00002000: K/W [no page found].'        \
+    'page fault at 0x00003000: K/W [no page found].'        \
+    'page fault at 0x00004000: K/W [no page found].'        \
+    'check_swap() succeeded!'                   \
+    '++ setup timer interrupts'
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+------------------------------------------------------------
+
+
+分析各个测试用例的调用流程
+
+
+user_main(void *arg) {
+#ifdef TEST
+    cprintf("user_main: name = \"%s\", binary = \"%p\", size = \"%u\"\n", 
+                        (const char *)TEST, (unsigned char *)TESTSTART, (size_t)TESTSIZE);
+    KERNEL_EXECVE2(TEST, TESTSTART, TESTSIZE);
+#else
+    KERNEL_EXECVE(exit);                如果没有定义TEST，那么调用的是 exit这个测试用例
+#endif
+    panic("user_main execve failed.\n");
+}
+
+
+kernel_execve: pid = 2, name = "exit".
+user_main: name = "exit", binary = "0xc0141585", size = "30917"
+I am the parent. Forking the child...
+I am parent, fork a child pid 3
+I am the parent, waiting now..
+I am the child.
+waitpid 3 ok.
+exit pass.
+all user-mode processes have quit.
+init check memory pass.
+
+
+
+
+
+KERNEL_EXECVE定义：
+#define KERNEL_EXECVE(x) ({                                             \
+            extern unsigned char _binary_obj___user_##x##_out_start[],  \
+                _binary_obj___user_##x##_out_size[];                    \
+            __KERNEL_EXECVE(#x, _binary_obj___user_##x##_out_start,     \
+                            _binary_obj___user_##x##_out_size);         \
+        })
+
+
+
+
+_binary_obj___user_exit_out_start  和  _binary_obj___user_exit_out_size 可以从下面获取
+
+zx@zx:~/2019/00_OS/02_ucore/labs/lab5$ grep -rn "_out_start"
+Binary file bin/kernel matches
+Binary file bin/ucore.img matches
+kern/process/proc.c:815:            extern unsigned char _binary_obj___user_##x##_out_start[],  \
+kern/process/proc.c:817:            __KERNEL_EXECVE(#x, _binary_obj___user_##x##_out_start,     \
+obj/kernel.sym:254:c01323d5 _binary_obj___user_badsegment_out_start
+obj/kernel.sym:323:c012ab28 _binary_obj___user_badarg_out_start
+obj/kernel.sym:338:c019467e _binary_obj___user_yield_out_start
+obj/kernel.sym:340:c016715b _binary_obj___user_hello_out_start
+obj/kernel.sym:346:c0141585 _binary_obj___user_exit_out_start
+obj/kernel.sym:426:c01762b3 _binary_obj___user_softint_out_start
+obj/kernel.sym:427:c0148e4a _binary_obj___user_faultread_out_start
+obj/kernel.sym:442:c015f879 _binary_obj___user_forktree_out_start
+obj/kernel.sym:467:c018540c _binary_obj___user_testbss_out_start
+obj/kernel.sym:477:c01506fa _binary_obj___user_faultreadkernel_out_start
+obj/kernel.sym:513:c0157fb0 _binary_obj___user_forktest_out_start
+obj/kernel.sym:609:c018cd0f _binary_obj___user_waitkill_out_start
+obj/kernel.sym:616:c017db61 _binary_obj___user_spin_out_start
+obj/kernel.sym:627:c016ea07 _binary_obj___user_pgdir_out_start
+obj/kernel.sym:658:c0139c86 _binary_obj___user_divzero_out_start
+Binary file obj/kern/process/proc.o matches
+Makefile:301:   $(V)$(MAKE) $(MAKEOPTS) "DEFS+=-DTEST=$* -DTESTSTART=$(RUN_PREFIX)$*_out_start -DTESTSIZE=$(RUN_PREFIX)$*_out_size"
+zx@zx:~/2019/00_OS/02_ucore/labs/lab5$
+zx@zx:~/2019/00_OS/02_ucore/labs/lab5$
+zx@zx:~/2019/00_OS/02_ucore/labs/lab5$
+zx@zx:~/2019/00_OS/02_ucore/labs/lab5$ grep -rn "_out_size"
+Binary file bin/kernel matches
+Binary file bin/ucore.img matches
+kern/process/proc.c:816:                _binary_obj___user_##x##_out_size[];                    \
+kern/process/proc.c:818:                            _binary_obj___user_##x##_out_size);         \
+obj/kernel.sym:249:000078ac _binary_obj___user_yield_out_size
+obj/kernel.sym:258:000078ac _binary_obj___user_hello_out_size
+obj/kernel.sym:270:00007903 _binary_obj___user_testbss_out_size
+obj/kernel.sym:326:000078ad _binary_obj___user_badarg_out_size
+obj/kernel.sym:382:000078ae _binary_obj___user_softint_out_size
+obj/kernel.sym:436:000078e2 _binary_obj___user_forktree_out_size
+obj/kernel.sym:449:000078ff _binary_obj___user_divzero_out_size
+obj/kernel.sym:456:000078b1 _binary_obj___user_badsegment_out_size
+obj/kernel.sym:465:000078ac _binary_obj___user_pgdir_out_size
+obj/kernel.sym:480:0000796f _binary_obj___user_waitkill_out_size
+obj/kernel.sym:516:000078ab _binary_obj___user_spin_out_size
+obj/kernel.sym:585:000078b6 _binary_obj___user_faultreadkernel_out_size
+obj/kernel.sym:605:000078c5 _binary_obj___user_exit_out_size
+obj/kernel.sym:631:000078b0 _binary_obj___user_faultread_out_size
+obj/kernel.sym:701:000078c9 _binary_obj___user_forktest_out_size
+Binary file obj/kern/process/proc.o matches
+Makefile:301:   $(V)$(MAKE) $(MAKEOPTS) "DEFS+=-DTEST=$* -DTESTSTART=$(RUN_PREFIX)$*_out_start -DTESTSIZE=$(RUN_PREFIX)$*_out_size"
+zx@zx:~/2019/00_OS/02_ucore/labs/lab5$
+zx@zx:~/2019/00_OS/02_ucore/labs/lab5$
+zx@zx:~/2019/00_OS/02_ucore/labs/lab5$
+
+
+
+
+
+所以要想调试某个测试用例，可以直接修改 user_main函数
+
+user_main(void *arg) {
+
+
+
+    KERNEL_EXECVE(forktree);                直接修改这儿，想要的测试用例名称
+
+    panic("user_main execve failed.\n");
+}
+
+
+
+
+
+
+
+------------------------------------------------------------
+内核态 使用int时，发生了什么
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+------------------------------------------------------------
+用户态 使用int时，发生了什么
+------------------------------------------------------------
+
+------------------------------------------------------------
+
+------------------------------------------------------------
+
+
+
+
+
+
+
+init_main函数
+
+
+(gdb) p/x current 
+$2 = 0xc0381008
+(gdb) p/x idleproc 
+$3 = 0xc0381008
+
+kern_init执行 cpu_idle调度后，会调度到initproc
+(gdb) p/x current 
+$10 = 0xc0381090
+(gdb) p/x initproc
+$11 = 0xc0381090
+
+
+init_main---》 kernel_thread---》 do_fork 创建3rd
+3rd
+(gdb) p/x proc
+$13 = 0xc0381118
+
+
+do_fork中会调用 set_links将创建的proc插入 proc_list中，
+这个是一个普通的链式list
+使用 list_add ---> list_add_after 插入
+list_add_after(&proc_list, 3rd);
+after的意思就是插入的位置就是 proc_list之后，
+proc_list是头结点，那么 就是将3rd插入 头的后面，
+结果就是将elm插入链表第一个正式的元素位置。
+如下：
+proc_list <---> 3rd <---> initproc
+
+其中initproc是之前创建的，也通过这种方式插入list
+
+
+list_add_before的意思是插入什么之前
+list_add_before(list_entry_t *listelm, list_entry_t *elm)
+就是插入listelm之前，如果listelm是链表的头结点，
+那么双向链表的头结点的prev，其实就是最后一个结点，
+结果就是将elm插入链表最后。
+如下：
+proc_list <---> initproc <---> 3rd
+
+其中initproc是之前创建的，也通过这种方式插入list
+
+
+
+list_add_after(listelm, elm)
+list_add_before(listelm, elm)
+listelm 可以是链表的头，也可以是随意指定的链表中的某结点
+
+当listelm是头结点时，
+list_add_after 就是 list_add_head
+list_add_before 就是 list_add_tail
+
+
+------
+
+init_main --》 do_wait执行后
+(gdb) p/x current
+$29 = 0xc0381090
+(gdb) p current->state
+$26 = PROC_SLEEPING
+(gdb) p/x current->wait_state
+$28 = 0x80000001                WT_CHILD
+
+
+init_main --》do_wait ---》schedule
+上面是initproc把自己置为 PROC_SLEEPING WT_CHILD，然后重新调度
+会选择3rd，执行 user_main
+user_main中使用 kernel_execve触发 sys_exec系统调用 ---》do_execve 创建一个新的程序映像替换3rd现在的映像
+(gdb) p/x next
+$31 = 0xc0381118
+(gdb) p/x current
+$36 = 0xc0381118
+
+
+do_execve---》load_icode 加载指定的3rd的新的程序映像，布置其用户态的入口地址和 cs ss寄存器 用户态栈等
+(gdb) p/x current    
+$40 = 0xc0381118
+(gdb) p/x current->mm
+$39 = 0xc03811a0
+
+
+系统调用也是中断，在 iret 执行前
+(gdb) i r esp
+esp            0xc038af88       0xc038af88
+(gdb) p/x *((int*)0xc038af88)
+$41 = 0x800020
+(gdb) p/x *((int*)0xc038af88+1)     cs
+$43 = 0x1b
+(gdb) p/x *((int*)0xc038af88+2)
+$44 = 0x200
+(gdb) p/x *((int*)0xc038af88+3)
+$45 = 0xb0000000
+(gdb) p/x *((int*)0xc038af88+4)     ss
+$46 = 0x23
+
+(gdb) i r cs ds ss
+cs             0x8      8
+ds             0x23     35
+ss             0x10     16
+
+
+
+load_icode最后
+    tf->tf_cs = USER_CS;
+    tf->tf_ds = tf->tf_es = tf->tf_ss = USER_DS;
+    tf->tf_esp = USTACKTOP;
+    tf->tf_eip = (uintptr_t)(0x800020);
+    tf->tf_eflags |= FL_IF;
+
+上面这些都与tf->tf_ 的设置相符合
+
+iret执行后，这些值会被恢复到各个寄存器中，尤其注意 cs和ds ss的变换，从内核态变化到了用户态
+从而执行 0x800020处用户程序
+
+
+iret执行后
+(gdb) s
+0x00800020 in ?? ()
+(gdb) p nr_process 
+$47 = 3
+(gdb) p/x current
+$48 = 0xc0381118
+
+
+(gdb) disab b 1-8
+c
+c
+c....
+
+serial    801389: I am
+
+
+
+
+process zx
+
+serial    abc
+
+(gdb) p num
+1           SYS_exit
+
+
+3rd在用户态使用exit函数，触发系统调用的响应函数 do_exit
+开始释放自己的资源
+(gdb) p/x idleproc
+$6 = 0xc0389008
+(gdb) p/x initproc
+$7 = 0xc0389090
+(gdb) p/x current
+$5 = 0xc0389118
+
+(gdb) p/x current->mm
+$8 = 0xc03891a0
+
+
+(gdb) p/x proc
+$10 = 0xc0389090
+
+
+proc = current->parent;
+if (proc->wait_state == WT_CHILD) {
+    wakeup_proc(proc);
+}
+
+之前init_main中创建好了 user_main后，initproc会执行do_wait，将自己置为 PROC_SLEEPING   WT_CHILD状态
+然后schedule 去执行  user_main，从而execv一个用户进程
+当这个用户进程执行完毕后，会调用exit函数，进而走到 kernel的 do_exit函数
+该函数中，如果用户进程的父进程如果是 WT_CHILD状态，那么就将其从 PROC_SLEEPING 状态，置为 PROC_RUNNABLE状态
+再进行schedule，此时就会调度到父进程，从而帮助自己完成最后的释放，彻底释放子进程。
+
+
+
+(gdb) b user_main
+(gdb) b do_execve
+运行到exec的iret之前，需要
+(gdb) b proc.c:865      init_main  schedule
+(gdb) b do_wait
+(gdb) b trap.c:245      print_ticks
+(gdb) b syscall
+(gdb) b do_exit
+
+
+do_exit---》schedule 会调度到父进程initproc
+(gdb) p/x next
+$13 = 0xc0389090
+
+
+------
+switch_to
+(gdb) i r eax
+eax            0xc0389134       -1070034636
+(gdb) p/x *((int*)0xc0389134)
+$16 = 0xc0109d10
+
+c0109ca8 <proc_run>:
+。。。。。
+c0109d0b:       e8 79 15 00 00          call   c010b289 <switch_to>
+c0109d10:       8b 45 ec                mov    -0x14(%ebp),%eax
+c0109d13:       89 04 24                mov    %eax,(%esp)
+c0109d16:       e8 04 fa ff ff          call   c010971f <__intr_restore>
+c0109d1b:       c9                      leave
+c0109d1c:       c3  
+
+(gdb) i r eax
+eax            0xc03890ac       -1070034772
+(gdb) p/x *((int*)0xc03890ac)
+$18 = 0xc0109d10
+
+（1）注意$16和$18的值都是0xc0109d10，也就是switch_to 的后一条指令
+因为目前代码中，只有 schedule---》proc_run---》switch_to 这一条调用到switch_to的链
+所以 从 initproc switch到 3rd， 再从 3rd 返回 initproc 后，
+3rd 需要保存到 context.eip的值，和initproc 需要恢复到 eip寄存器的值，应该是一样的，都是 proc_run中调用 switch_to 的后一条指令
+
+
+（2）一开始从 initproc switch到 3rd 时，
+initproc需要保存到 context.eip的值 是 proc_run中调用 switch_to 的后一条指令
+3rd 需要恢复到 eip寄存器的值，是创建这个 3rd时，初始化的 proc->context.eip = (uintptr_t)forkret;
+这样3rd 会从forkret开始，执行 user_main，然后创建进程，执行进程，直到进程执行完毕后，执行exit   再到kernel的 do_exit   schedule  switch_to
+
+此时，会switch_to 到 initproc
+然后，和上面（1）说的一样，
+3rd 需要保存到 context.eip的值，是自己调用 proc_run中调用 switch_to 的后一条指令
+initproc 需要恢复到 eip寄存器的值，是自己的 context.eip，也就是 proc_run中调用 switch_to 的后一条指令
+
+所以$16和$18的值都是0xc0109d10，也就是switch_to 的后一条指令
+
+所以switch_to执行时，除了创建新进程时的 proc->context.eip = (uintptr_t)forkret;
+其他正常切换时，不再调度的进程需要保存的 context.eip，  和调度执行的进程需要恢复到eip寄存器的值，都是proc_run中调用 switch_to 的后一条指令
+
+
+简单理解就是 不再调度的进程需要将下一条指令保存到 context.eip
+调度到的进程需要将下一条指令 context.eip 恢复到寄存器 eip中
+
+而保存时，就是将 proc_run中调用 switch_to 的后一条指令的地址保存到 context.eip中
+所以折腾来折腾去，还是同一个值。
+
+
+
+【！！！】也就是一个进程，每次调度到之后，都是执行proc_run中调用 switch_to 的后一条指令
+因为该进程上一次调度时，是执行 proc_run中调用 switch_to 才切换出去的
+
+
+
+(gdb) b proc.c:223
+(gdb) s             执行了switch_to的ret指令
+
+Breakpoint 9, proc_run (proc=0xc0389118) at kern/process/proc.c:223
+
+
+
+--------
+
+c0109ca8 <proc_run>:
+。。。。。
+c0109d0b:       e8 79 15 00 00          call   c010b289 <switch_to>
+c0109d10:       8b 45 ec                mov    -0x14(%ebp),%eax
+c0109d13:       89 04 24                mov    %eax,(%esp)
+c0109d16:       e8 04 fa ff ff          call   c010971f <__intr_restore>
+c0109d1b:       c9                      leave
+c0109d1c:       c3  
+
+
+果然，回到了 proc_run，c代码层面需要执行的是 local_intr_restore
+
+(gdb) p/x proc
+$19 = 0xc0389118
+(gdb) bt
+#0  proc_run (proc=0xc0389118) at kern/process/proc.c:223
+#1  0xc010b43a in schedule () at kern/schedule/sched.c:47
+#2  0xc010ad57 in do_wait (pid=0, code_store=0x0) at kern/process/proc.c:751
+#3  0xc010af9b in init_main (arg=0x0) at kern/process/proc.c:864
+#4  0xc01096af in kernel_thread_entry () at kern/process/entry.S:6
+(gdb) p/x current
+$20 = 0xc0389090            切换回了 initproc
+
+为何 proc=0xc0389118 ？  这个是 3rd
+
+看一下bt的结果，就清楚了
+从init_main创建完 3rd 后，initproc调用 do_wait，将自己置为PROC_SLEEPING   WT_CHILD状态
+然后调用 schedule去调度，schedule会选择一个 进程，选择的就是 3rd，
+然后调用 proc_run(next) ，这个next就是 3rd
+
+见上方的调试记录，复制一份如下：
+“
+init_main --》 do_wait执行后
+(gdb) p/x current
+$29 = 0xc0381090
+(gdb) p current->state
+$26 = PROC_SLEEPING
+(gdb) p/x current->wait_state
+$28 = 0x80000001
+
+
+
+schedule
+
+(gdb) p/x next
+$31 = 0xc0381118
+”
+
+proc_run函数的入参就是 3rd，即 0xc0381118，switch后切换到 3rd执行，执行用户进程的代码
+当切换回来时，回到的是 initproc进程，也就是initproc进程的proc_run调用 switch_to的时刻
+那么前面initproc选择了 3rd 执行switch_to，所以proc_run的入参自然还是 3rd，即0xc0381118
+
+
+
+proc_run(struct proc_struct *proc) {                （1）initproc进程中，选择 3rd进行proc_run
+    if (proc != current) {
+        bool intr_flag;
+        struct proc_struct *prev = current, *next = proc;
+        local_intr_save(intr_flag);
+        {
+            current = proc;
+            load_esp0(next->kstack + KSTACKSIZE);
+            lcr3(next->cr3);
+            switch_to(&(prev->context), &(next->context)); （2）切换到了 3rd进程，执行用户程序的代码，执行完毕后，用户进程会使用exit返回，会触发用户进程中使用proc_run调用 switch_to 返回 initproc
+        }
+        local_intr_restore(intr_flag);                  （3）从3rd 返回到了 initproc，即initproc调用switch_to 后自身中断的地方，initproc继续执行，
+                                                            此时，就像initproc调用proc_run   switch_to 没有中断一样，还是继续留在 initproc的栈的proc_run函数调用帧中
+    }
+}
+
+
+所以返回到initproc后，此时，initproc继续执行，就像没有上下文切换过一样，所以还是在 initproc的栈的proc_run函数调用帧中，所以 入参肯定还是 3rd
+
+所以两个正常切换的进程（指的是 不包括创建时切换去执行forkret），switch_to 回到的都是 切换到的进程的栈的proc_run函数调用帧中
+即将运行的是local_intr_restore函数
+
+所以继续运行后，会结束initproc的栈的proc_run函数
+结束 initproc的栈的schedule函数
+回到最初调用schedule的地方，也就是 do_wait，这和bt看到的是一样的。
+
+【！！！】也就是可以认为，A调用schedule，切换出去，切换到B，然后B再调用schedule切换回A后，
+还是会回到A之前调用schedule的下一条语句中，继续执行
+如果再切换回B，那么就回到 B之前调用schedule的下一条语句中
+
+
+复制上面的调试记录有
+“
+init_main --》 do_wait执行后
+(gdb) p/x current
+$29 = 0xc0381090
+(gdb) p current->state
+$26 = PROC_SLEEPING
+(gdb) p/x current->wait_state
+$28 = 0x80000001
+
+
+
+schedule
+
+(gdb) p/x next
+$31 = 0xc0381118
+(gdb) p/x current
+$36 = 0xc0381118
+”
+--------------------
+
+
+initproc在 do_wait 执行schedule，又返回后
+
+在do_wait 中继续 if (current->flags & PF_EXITING)
+
+
+此时肯定不会是 PF_EXITING退出状态
+
+所以会回到 repeat:
+因为在 init_main中调用 do_wait时，pid参数是0，
+所以进入 else分支
+那么就是选择一个进程进行wait 
+
+目前只有3个进程，所以选择的肯定是 3rd
+
+之前3rd在做do_exit时，已经将自己设置为 PROC_ZOMBIE
+
+所以这次找到了 进入do_wait的 found:
+
+这样initproc会帮助3rd完全释放资源
+3rd被彻底释放了
+
+
+unhash_proc(proc);
+remove_links(proc);
+put_kstack(proc);
+kfree(proc);
+
+从proc的两种列表中删除，释放栈内存，释放自身的数据结构，彻底毁尸灭迹
+3rd到此不再存在
+
+
+
+虽然3rd在do_exit最后执行了 schedule，自身停在 schedule这个位置上（proc_run中调用 switch_to 的后一条指令），
+但是由于3rd在do_exit中已经释放了自己能释放的mm pgdir等，
+又在 initproc进程中被 initproc-do_wait 彻底释放，所以不可能再通过schedule 返回这个位置了。
+
+此时nr_process 为 2
+
+-----------------
+
+initproc释放3rd后，在do_wait中返回0，
+所以会在 initproc的主函数 init_main中， while (do_wait(0, NULL) == 0) {schedule();
+进入循环体，执行schedule，此时只有idleproc和initproc了
+那么 经过选择，选择 initproc作为调度，执行 proc_run
+在其中会判断选择调度的initproc和当前运行的proc是否一致
+此时一致，那么不需要进行切换，schedule结束
+又回到initmain中的do_wait
+
+继续执行do_wait
+此次执行，会进入repeat： else分支
+然后proc = current->cptr;   这个proc此时肯定是NULL
+原因是在上面执行do_wait 最终释放 3rd时，
+在remove_links中会 proc->optr 和 proc->yptr 均是NULL，
+所以 proc->parent->cptr = proc->optr;    就是将 initproc->cptr 置为NULL
+
+proc此时是NULL，那么不会进入for循环，haskid为0
+那么就会 return -E_BAD_PROC;
+导致 init_main 中退出 while
+看来 initproc也要准备退出了
+
+
+
+在使用kernel_thread创建内核线程时，
+    tf.tf_cs = KERNEL_CS;
+    tf.tf_ds = tf.tf_es = tf.tf_ss = KERNEL_DS;
+    tf.tf_regs.reg_ebx = (uint32_t)fn;
+    tf.tf_regs.reg_edx = (uint32_t)arg;
+    tf.tf_eip = (uint32_t)kernel_thread_entry;
+    
+在copy_thread(struct proc_struct *proc, uintptr_t esp, struct trapframe *tf) {
+。。。
+    proc->context.eip = (uintptr_t)forkret;
+    proc->context.esp = (uintptr_t)(proc->tf);
+}
+    
+    
+这样，在 被创建的内核线程被第一次调度时，会先执行 forkret，然后trapret
+iret，这样会触发 kernel_thread_entry
+
+kernel_thread_entry:        # void kernel_thread(void)
+
+    pushl %edx              # push arg
+    call *%ebx              # call fn
+
+    pushl %eax              # save the return value of fn(arg)
+    call do_exit            # call do_exit to terminate current thread
+
+然后调用fn，就是创建线程的主函数，一般主函数退出后，线程也要销毁了
+
+可以看到，fn执行后，initproc线程中将结果带入执行 do_exit
+
+然后initproc会 panic
+    if (current == initproc) {
+        panic("initproc exit.\n");
+    }
+
+
+
+
+
+-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------
+
+操作系统的主要功能是给上层应用提供服务，管理整个计算机系统中的资源。
+所以操作系统虽然是一个软件，但其实是一个基于事件的软件，这里操作系统需要响应的事件包括三类：外设中断、CPU执行异常（比如访存错误）、陷入（系统调用）。
+
+
+
+
+陷入（系统调用）
+#define SETGATE(gate, istrap, sel, off, dpl)
+    // set for syscall
+    SETGATE(idt[T_SYSCALL], 1, GD_KTEXT, __vectors[T_SYSCALL], DPL_USER);
+
+    DPL需要设置为 DPL_USER，否则（也就是设置成DPL_KERNEL）进行系统调用的时候，会报 "General Protection",
+
+系统调用就是 一种 陷入，也很形象，从用户态 陷入 内核态，利用内核完成 用户态的 需求
+
+所以istrap 选择 1
+
+
+
+
+-----------------------------------------------------------------------------
+
+
+
+用户级线程和内核级线程的区别：（1）内核支持线程是OS内核可感知的，而用户级线程是OS内核不可感知的。（2）用户级线程的创建、撤消和调度不需要OS内核的支持，是在语言（如Java）这一级处理的；而内核支持线程的创建、撤消和调度都需OS内核提供支持，而且与进程的创建、撤消和调度大体是相同的。（3）用户级线程执行系统调用指令时将导致其所属进程被中断，而内核支持线程执行系统调用指令时，只导致该线程被中断。（4）在只有用户级线程的系统内，CPU调度还是以进程为单位，处于运行状态的进程中的多个线程，由用户程序控制线程的轮换运行；在有内核支持线程的系统内，CPU调度则以线程为单位，由OS的线程调度程序负责线程的调度。（5）用户级线程的程序实体是运行在用户态下的程序，而内核支持线程的程序实体则是可以运行在任何状态下的程序。
+
+
+内核线程的优点：（1）当有多个处理机时，一个进程的多个线程可以同时执行。
+缺点：（1）由内核进行调度。
+
+用户进程的优点：（1） 线程的调度不需要内核直接参与，控制简单。（2） 可以在不支持线程的操作系统中实现。（3） 创建和销毁线程、线程切换代价等线程管理的代价比内核线程少得多。（4） 允许每个进程定制自己的调度算法，线程管理比较灵活。（5） 线程能够利用的表空间和堆栈空间比内核级线程多。（6） 同一进程中只能同时有一个线程在运行，如果有一个线程使用了系统调用而阻塞，那么整个进程都会被挂起。另外，页面失效也会产生同样的问题。
+缺点：（1）资源调度按照进程进行，多个处理机下，同一个进程中的线程只能在同一个处理机下分时复用
+
+作者：那场遇见
+链接：https://www.zhihu.com/question/25367227/answer/149887860
+
+
+
+
+
+两个模型的差异在于， 进程更安全，一个进程完全不会影响另外的进程。所以这也是 unix 哲学里推荐的编程方法；但是进程间通信比线程间通信的性能差很多，尤其是，如果这个是系统的关键部分，而又有大量数据的时候，所有的进程间通信方法都比线程间的通信慢很多
+所以通常情况下推荐多进程程序，就像 nginx，一个 master 多个 worker，进程间只进行有限的通信（传递命令而非数据）
+多线程的典型例子是 unbound，一个开源的递归 dns 服务器。它使用线程的理由也很充分：程序需要不停地向后方的授权 dns 请求数据，并传回给前方的模块。这个数据通信量大，性能要求又高，所以必须用多线程，如果是多个进程，那就要慢许多了
+
+
+
+CPU 的两个核心可以同时操作两个不同的进程，无需复制和交换上下文，因为两个进程不相干。
+但如果两个核心同时操作两个不同的线程，则切换核心时需要把相关的上下文从一个核心同步到另外一个核心，因为两个线程需要共享很多东西。
+从这个角度，进程的效率在特定情况下甚至是优于线程的。
+
+
+
+
+
+-----------------------------------------------------------------------------
+
+用户级线程可以调用内核，阻塞的时候全部用户线程阻塞。那么用户线程如何调度呢，答案是异步io，所有io操作使用异步模式，然后切换到其他用户线程。
+调用内核阻塞之后其他用户线程并不能获得调度
+
+
+作者：康乔
+链接：https://www.zhihu.com/question/57402169/answer/153310216
+
+
+这里纯用户进程 不是内部线程无法调用内核吗 
+那为什么线程2阻塞是调用i o？ 如果单纯看这个问题，答案应该是可以。
+操作系统的功能本来就是提供各种服务，如果用户态的程序无法调用内核，那还要内核有什么用呢。
+当然，这里的调用不是直接进行函数调用，而是通过系统调用等手段的间接的、受控制的调用。具体到你的情况，即用户态线程能不能这样做，答案当然还是可以。
+线程库没有能力阻止用户线程直接进行系统调用请求内核服务。举个例子，比如某线程2完全可以直接调用read()请求进行读文件操作。即使C库或者线程库对read进行了包装/重定向，线程2完全可以直接以trap指令（例如x86的int x80或者sysenter指令）来调用read，所以没有不能调用内核一说。
+由于read()是blocking调用（可能导致用户程序被阻塞），而一旦这种阻塞发生，内核将直接阻塞进程b，因此即使线程1本来可以运行，在内核的作用下线程1、2都将无法运行，直到线程2的读文件请求不再被阻塞。
+这其实就是纯用户态线程最大的痛点——blocking的系统调用会导致整个进程被阻塞。
+
+还有这种情况是不是导致了进程b处于阻塞而线程2处于运行因为进程b还没调用线程库将线程2设为阻塞态？ 这么长的一个句子，连个逗号都没有。。。你真的觉得我们能看懂吗
+你这种说法虽然有一定道理，但未免显得有些业余。为什么有道理：由于内核不知道线程1、2的存在（用户态线程），因此线程2调用read调用的时候，内核只知道这是进程b的一次系统调用，因此阻塞发生时，内核把进程b在内核的状态设为阻塞态。
+由于线程2对read的调用可能绕过了线程库，因此线程库的代码（比如说某个管理线程）还没来得及执行，因此线程2在进程b的视角下（即在线程库的线程状态表中），确实是非阻塞态，即运行态的。
+为什么说有点业余：通过上面的分析我们已经看到，一个说的是进程在内核的状态，一个说的是线程在线程库中的状态，是两个层面的东西，实际上它们之间不是充要条件的关系，不需要完全保持同步。
+实际上，进程在内核态可运行是线程可以真正运行的必要条件。进一步说，这样看似“矛盾”的情况会不会出问题呢？
+其实没关系，虽然进程b还认为线程1、2都能运行，但实际上整个进程都在挂起，进程b这样这时候想什么都没有任何意义。只有进程b恢复了在内核的可运行状态，进程b对线程的控制才会奏效。
+
+【zx】
+用户进程P的视角下，线程a和b都能运行
+但是在内核视角下，进程P已经被阻塞了，是不能被运行的，所以无论进程P怎么看自己的线程，都是没有意义的
+只有该进程被调度后，才会考虑其线程的运行，重新恢复进程P对其线程的控制。
+
+【zx】
+当进程P的某个线程被阻塞后，由于内核并没有用户线程的概念，所以这些用户线程对内核来说是没有意义的
+内核视角下，只有进程P，所以此时，内核会认为是进程P阻塞了。
+由于线程2对read的调用可能绕过了线程库，因此线程库的代码（比如说某个管理线程）还没来得及执行，
+因此线程2在进程b的视角下（即在线程库的线程状态表中），确实是非阻塞态，即运行态的。
+
+
+【zx】
+与上面对比
+轻量级线程(LWP)是一种由内核支持的用户线程。
+（虽然叫用户线程，但是和上面的纯用户线程还是不一样的）
+（上面的线程，内核不会感知到，是绕过内核创建的，但是这里的，LWP，可以通过pthread库生成，会调用Clone系统调用，内核会1:1创建一个内核线程的，所以内核是会感知的。）
+它是基于内核线程的高级抽象，因此只有先支持内核线程，才能有LWP。
+每一个进程有一个或多个LWPs，每个LWP由一个内核线程支持。
+这种模型实际上就是恐龙书上所提到的一对一线程模型。
+在这种实现的操作系统中，LWP就是用户线程。由于每个LWP都与一个特定的内核线程关联，因此每个LWP都是一个独立的线程调度单元。
+即使有一个LWP在系统调用中阻塞，也不会影响整个进程的执行。
+
+作者：那场遇见
+链接：https://www.zhihu.com/question/35128513/answer/149887391
+
+
+
+
+Linux里，用户代码通过pthread库创建线程的过程虽然看似是用户在创建“用户级线程”，实际上是pthread_create暗中调用了clone系统调用，由操作系统帮忙创建内核级线程的过程，因而不能称作用户级线程。
+一般的用户级线程指的是创建、调度和销毁都不经过操作系统，他们的创建与调度由库来实现，操作系统是无法感知多个用户级线程的。
+但是在Linux中使用pthread_create创建的“用户线程”准确讲应该叫轻量级进程。
+每使用pthread_create创建一次轻量级进程，OS都会相应地为应用程序生成一个可供内核调度的实体，暂且称作内核线程吧。
+这就是前面有人讲的Linux线程管理中的NPTL 1:1模型，即1个轻量级线程对应一个内核级线程。所以这个“轻量级进程”并不是上一段里讲的用户级线程。
+
+作者：缺德的德
+链接：https://www.zhihu.com/question/35128513/answer/133258757
+
+
+轻量级进程具有局限性。首先，大多数LWP的操作，如建立、析构以及同步，都需要进行系统调用。系统调用的代价相对较高：需要在user mode和kernel mode中切换。其次，每个LWP都需要有一个内核线程支持，因此LWP要消耗内核资源（内核线程的栈空间）。因此一个系统不能支持大量的LWP。
+
+用户线程LWP虽然本质上属于用户线程，但LWP线程库是建立在内核之上的，LWP的许多操作都要进行系统调用，因此效率不高。
+而这里的用户线程指的是完全建立在用户空间的线程库，用户线程的建立，同步，销毁，调度完全在用户空间完成，不需要内核的帮助。
+因此这种线程的操作是极其快速的且低消耗的。
+上图是最初的一个用户线程模型，从中可以看出，进程中包含线程，用户线程在用户空间中实现，内核并没有直接对用户线程进行调度，内核的调度对象和传统进程一样，还是进程本身，内核并不知道用户线程的存在。
+用户线程之间的调度由在用户空间实现的线程库实现。这种模型对应着恐龙书中提到的多对一线程模型，其缺点是一个用户线程如果阻塞在系统调用中，则整个进程都将会阻塞。
+
+加强版的用户线程——用户线程+LWP这种模型对应着恐龙书中多对多模型。用户线程库还是完全建立在用户空间中，因此用户线程的操作还是很廉价，因此可以建立任意多需要的用户线程。
+操作系统提供了LWP作为用户线程和内核线程之间的桥梁。LWP还是和前面提到的一样，具有内核线程支持，是内核的调度单元，并且用户线程的系统调用要通过LWP，因此进程中某个用户线程的阻塞不会影响整个进程的执行。
+用户线程库将建立的用户线程关联到LWP上，LWP与用户线程的数量不一定一致。当内核调度到某个LWP上时，此时与该LWP关联的用户线程就被执行。
+小结：很多文献中都认为轻量级进程就是线程，实际上这种说法并不完全正确，从前面的分析中可以看到，只有在用户线程完全由轻量级进程构成时，才可以说轻量级进程就是线程。
+
+
+
+-----------------------------------------------------------------------------
+
+【Q】
+
+
+在os中，或者至少是在ucore中，创建一个用户进程的过程，是不是都是和创建3rd的过程是一样的？
+
+先创建一个内核线程，然后将该内核线程的程序映像使用 execve 替换成 用户程序的映像，然后就可以了 ？
+
+3rd是在 initproc 中创建了3rd内核线程，然后又使用kernel_execve 替换程序映像的，
+
+那么在用户空间中，创建时，是不是也是这样的 ？比如使用用户空间的 fork 创建一个用户进程，是不是也需要现在内核态创建一个内核线程
+然后在用户空间再使用exec 去替换进程的程序映像？
+还是别的什么过程？
+
+【A】
+截止到lab5，并没有实现用户态的fork-exec组合，只是实现了 fork
+
+在内核态，实现了二者，内核态的目前是initproc线程 使用 kernel_thread  调用 do_fork创建内核线程3rd，
+而3rd线程的主函数（例如user_main）调用 kernel_execve去加载新的用户程序映像去替换3rd的程序映像
+
+
+
+
+
+-----------------------------------------------------------------------------
+
+【Q】
+
+这些err是怎么来的？含义是什么
+run_test -prog 'badsegment' -check default_check                \
+        'kernel_execve: pid = 2, name = "badsegment".'          \
+      - 'trapframe at 0xc.......'                               \
+        'trap 0x0000000d General Protection'                    \
+        '  err  0x00000028'                                     \
+      - '  eip  0x008.....'           
+
+
+
+
+
+
+
+      
+      
+      
+      
+      
+      
+      
+      
+【spin测试用例时序图】
+
+注意：每一次tick时均会引起 定时器中断
+触发 trap   trap_dispatch   case IRQ_OFFSET + IRQ_TIMER:
+
+3rd调度运行，执行fork
+打印
+yield()     
+            ---------------------------------------》   4th开始第一次执行
+                                                        forkret...
+                                                        打印
+                                                        while(1)...
+                                                        某次tick时，进入4th：trap(!)---》4th：trap_dispatch
+                                                        此次tick将到达整百ticks数
+                                                        进入if (ticks % TICK_NUM == 0)
+                                                        打印，将4th->need_resched置为1
+                                                        退出4th：trap_dispatch
+                                                        会进入4th：trap(!) if (!in_kernel)
+                                                        不进入         if (4th->flags & PF_EXITING)
+                                                        进入          if (4th->need_resched)
+            《---------------------------------------    proc_run 《----  schedule                                    
+yield()                                                     
+            ---------------------------------------》                                            
+                                                        从proc_run 退出，回到schedule
+                                                        然后从4th：trap(!)中退出
+                                                        继续执行 while(1)...    （注1）
+                                                        某次tick时，进入4th：trap(!)---》4th：trap_dispatch
+                                                        此次tick将到达整百ticks数
+                                                        进入if (ticks % TICK_NUM == 0)
+                                                        打印，将4th->need_resched置为1
+                                                        退出4th：trap_dispatch
+                                                        会进入4th：trap(!) if (!in_kernel)
+                                                        不进入         if (4th->flags & PF_EXITING)
+                                                        进入          if (4th->need_resched)
+            《---------------------------------------    proc_run 《----  schedule                                    
+yield()                                                     
+            ---------------------------------------》                        
+                                                        从proc_run 退出，回到schedule
+                                                        然后从4th：trap(!)中退出
+                                                        继续执行 while(1)...    （注1）
+                                                        某次tick时，进入4th：trap(!)---》4th：trap_dispatch
+                                                        此次tick将到达整百ticks数
+                                                        进入if (ticks % TICK_NUM == 0)
+                                                        打印，将4th->need_resched置为1
+                                                        退出4th：trap_dispatch
+                                                        会进入4th：trap(!) if (!in_kernel)
+                                                        不进入         if (4th->flags & PF_EXITING)
+                                                        进入          if (4th->need_resched)
+            《---------------------------------------    proc_run 《----  schedule                                                        
+打印                                                      
+kill(4th)
+进入3rd：trap(!)---》3rd：trap_dispatch
+进入do_kill
+4th置上PF_EXITING
+退出do_kill  ---》3rd：trap_dispatch
+返回3rd：trap(!)调用 3rd：trap_dispatch的下一句
+进入 3rd：trap(!) if (!in_kernel)
+不进入         if (3rd->flags & PF_EXITING)
+不进入     if (3rd->need_resched)
+退出3rd：trap(!) 
+退出到 __trapret
+返回到用户空间（注2），结束kill系统调用
+
+waitpid(4th)
+进入3rd：trap(!)---》3rd：trap_dispatch
+进入do_wait(!)
+进入if (haskid) 分支
+将3rd设置为 PROC_SLEEPING WT_CHILD
+schedule---》proc_run  ------------------------------》
+                                                        从proc_run 退出，回到schedule
+                                                        然后从4th：trap(!)中退出
+                                                        继续执行 while(1)...    （注1）
+                                                        下一次tick时，进入4th：trap(!)---》4th：trap_dispatch
+                                                        不一定是整百的ticks
+                                                        退出4th：trap_dispatch
+                                                        会进入4th：trap(!) if (!in_kernel)
+                                                        3rd中执行kill(4th)时， 4th已经置上PF_EXITING
+                                                        所以会进入   if (4th->flags & PF_EXITING)
+                                                        执行 do_exit(-E_KILLED);
+                                                        在do_exit中，会清除4th的mm
+                                                        置4th 为 PROC_ZOMBIE，和error_code
+                                                        将4th的parent，也就是3rd执行 wakeup
+                                                        （3rd在自己调用do_wait时已经置为了PROC_SLEEPING WT_CHILD）
+                                                        wakeup后，置为PROC_RUNNABLE，清除WT_CHILD
+            《---------------------------------------    proc_run 《----  do_exit：schedule                                                        
+从proc_run 退出，回到schedule
+回到do_wait(!)
+返回到repeat:
+在上面4th执行do_exit时，
+已经设置为 PROC_ZOMBIE
+所以找到4th
+进入found:
+继续销毁4th，4th彻底不存在了
+do_wait(!)返回
+依次返回sys_wait  syscall  3rd：trap_dispatch
+最后回到 3rd：trap(!)调用 3rd：trap_dispatch的下一句
+进入 3rd：trap(!) if (!in_kernel)
+不进入         if (3rd->flags & PF_EXITING)
+不进入     if (3rd->need_resched)
+退出3rd：trap(!) 
+退出到 __trapret
+返回到用户空间（注2），结束waitpid系统调用
+
+
+      
+
+
+注1
+__trapret:
+iret执行之前
+(gdb) i r esp
+esp            0xc03a4fec       0xc03a4fec
+(gdb) p/x *((int*)0xc03a4fec)
+$6 = 0x800fd4
+
+zx@zx:~/2019/00_OS/02_ucore/labs/lab5$ objdump -d obj/__user_spin.out |grep 800fd4 -C 30
+
+00800f91 <main>:
+
+  800fcf:       e8 44 f1 ff ff          call   800118 <cprintf>
+  800fd4:       eb fe                   jmp    800fd4 <main+0x43>
+
+对应的就是 while(1) 代码
+
+
+
+
+
+
+注2
+__trapret:
+iret执行之前
+
+(gdb) i r esp
+esp            0xc0393fec       0xc0393fec
+(gdb) p/x *((int*)0xc0393fec)
+$8 = 0x8001d5
+
+zx@zx:~/2019/00_OS/02_ucore/labs/lab5$ objdump -d obj/__user_badarg.out  |grep 8001d5 -C 40
+
+0080018d <syscall>:
+  80018d:       55                      push   %ebp
+  80018e:       89 e5                   mov    %esp,%ebp
+
+  8001d0:       8b 45 08                mov    0x8(%ebp),%eax
+  8001d3:       cd 80                   int    $0x80
+  8001d5:       89 45 ec                mov    %eax,-0x14(%ebp) 
+
+对应的是调用中断（调用系统）命令的语句的下一条，就从系统调用中返回到用户空间了
+
+
+
+
+【总结】
+
+
+trap_in_kernel(struct trapframe *tf) {
+    return (tf->tf_cs == (uint16_t)KERNEL_CS);
+}
+
+void
+trap(struct trapframe *tf) {
+    // dispatch based on what type of trap occurred
+    // used for previous projects
+    if (current == NULL) {
+        trap_dispatch(tf);
+    }
+    else {
+        // keep a trapframe chain in stack
+        struct trapframe *otf = current->tf;
+        current->tf = tf;
+    
+        bool in_kernel = trap_in_kernel(tf);
+    
+        trap_dispatch(tf);
+    
+        current->tf = otf;
+        if (!in_kernel) {
+            if (current->flags & PF_EXITING) {
+                do_exit(-E_KILLED);
+            }
+            if (current->need_resched) {
+                schedule();
+            }
+        }
+    }
+}
+
+
+
+中断发生时，cpu会自动压入 一组寄存器 {[ss esp |] eflags | cs eip}
+以及利用汇编代码压入其他的一些寄存器，
+这些都作为trapframe，以保存现场环境，用于将来恢复被打断的程序继续执行
+
+当调用中断服务例程trap时，这些压入的寄存器值，又可以作为trap函数的入参，即struct trapframe tf
+当trap函数中，判断是否 in_kernel时，
+利用压入的tf_cs进行判断，中断发生时，是否是在内核上下文，还是用户上下文？
+所以就看中断发生时，到底是位于什么上下文了
+比如用户态时进行了系统调用fork wait kill exit yield等，就处于用户上下文，不再内核中
+如果是在用户进程执行时，发生了定时器中断，那么就任务是用户上下文
+如果是在内核进程执行时，发生了缺页中断，那么就处于内核上下文中（？【Q】缺页验证）
+如果是在内核进程执行时，发生了定时器中断，那么就任务是（？【Q】改造initproc加while(1)进行验证）
+
+
+当发生用户上下文中断时，就需要判断是否要执行 do_exit（该进程被执行kill后      进入该分支）
+和 schedule（时间片用完     自己执行do_yield放弃cpu      进入该分支）
+
+
+
+
+
+当使用wait时，如果父进程有子进程，而且子进程不是僵尸进程，那么父进程就要让出cpu进行等待；
+此时重新调度，（可能）回到子进程，直到子进程结束后，
+再次调度，从而（可能）再回到父进程，
+父进程重新检查子进程，发现子进程是僵尸进程，那么就销毁子进程，退出wait操作。
+
+理解的时候，一定要注意上下文，到底是在谁的上下文中进行了操作。
+
+
+yield 自己让出cpu，与其他进程无关
+exit  自己退出，内部唤醒父进程
+kill wait 自己去杀掉或者等待参数中指定的进程，关联到俩进程
+fork  自己去生成一个子进程，子进程号不确定，过程中指定
+timer 当前谁在运行，就是谁要被调度出去
+
+
+   
+schedule到别人后，又再次schedule回来时，会回到之前schedule的地方，继续执行，就像没有发生切换一样
+要牢牢抓住这一点进行理解   
+      
+      
+      
+      
+      
+      
+      
+      
+      
+      
+      
+      
+      
+      
+      
+      
+      
+      
+      
+      
+      
+      
