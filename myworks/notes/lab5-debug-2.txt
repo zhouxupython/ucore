@@ -1,0 +1,1208 @@
+
+
+yield
+
+
+int
+do_yield(void) {
+    current->need_resched = 1;
+    return 0;
+}
+
+
+
+kernel_thread 中创造 thread时，是内核线程，所以
+cs 和 ds 都是 kernel模式的  KERNEL_CS  KERNEL_DS
+
+但是使用load_icode替换为用户映像时，就要改变成 USER_CS USER_DS
+就要变成user模式的了
+
+
+
+
+++ setup timer interrupts
+[schedule] current: 0xc038a008, current->need_resched: 1
+proc_run: 0xc038a090 [name:init  pid:1]
+[schedule] current: 0xc038a090, current->need_resched: 0
+proc_run: 0xc038a118 [name:      pid:2]
+kernel_execve: pid = 2, name = "yield".
+user_main: name = "yield", binary = "0xc019569a", size = "30892"
+Hello, I am process 2.
+current: 0xc038a118, current->need_resched: 0
+[schedule] current: 0xc038a118, current->need_resched: 1
+[schedule] next == currentBack in process 2, iteration 0.
+current: 0xc038a118, current->need_resched: 0
+[schedule] current: 0xc038a118, current->need_resched: 1
+[schedule] next == currentBack in process 2, iteration 1.
+current: 0xc038a118, current->need_resched: 0
+[schedule] current: 0xc038a118, current->need_resched: 1
+[schedule] next == currentBack in process 2, iteration 2.
+current: 0xc038a118, current->need_resched: 0
+[schedule] current: 0xc038a118, current->need_resched: 1
+[schedule] next == currentBack in process 2, iteration 3.
+current: 0xc038a118, current->need_resched: 0
+[schedule] current: 0xc038a118, current->need_resched: 1
+[schedule] next == currentBack in process 2, iteration 4.
+All done in process 2.
+yield pass.
+[schedule] current: 0xc038a118, current->need_resched: 0
+proc_run: 0xc038a090 [name:init  pid:1]
+[schedule] current: 0xc038a090, current->need_resched: 0
+[schedule] next == currentall user-mode processes have quit.
+init check memory pass.
+
+
+
+调试
+b kern_init
+b do_execve
+c
+断到do_execve时，添加断点
+b do_yield
+
+c
+进入do_yield
+(gdb) bt
+#0  do_yield () at kern/process/proc.c:711
+#1  0xc010b597 in sys_yield (arg=0xc0393f14) at kern/syscall/syscall.c:40
+#2  0xc010b667 in syscall () at kern/syscall/syscall.c:93
+#3  0xc0102961 in trap_dispatch (tf=0xc0393fb4) at kern/trap/trap.c:226
+#4  0xc0102b93 in trap (tf=0xc0393fb4) at kern/trap/trap.c:319
+#5  0xc0102be8 in __alltraps () at kern/trap/trapentry.S:24
+#6  0xc0393fb4 in ?? ()
+
+
+执行，然后一层层退出系统调用，会回到 trap 函数
+
+仔细看trap函数，从 trap_dispatch调用退出后，会有 
+schedule的调用
+
+
+在中断情况下，几种情况会引起schedule切换到别的进程
+（1）定时器中断，ticks到时间了，时间片用完（待验证【Q】）
+
+（2）进程自己触发yield，自己放弃CPU
+
+中断服务例程完成后，会进行重新的调度
+
+
+void
+trap(struct trapframe *tf) {
+    // dispatch based on what type of trap occurred
+    // used for previous projects
+    if (current == NULL) {
+        trap_dispatch(tf);
+    }
+    else {
+        // keep a trapframe chain in stack
+        struct trapframe *otf = current->tf;
+        current->tf = tf;
+    
+        bool in_kernel = trap_in_kernel(tf);
+    
+        trap_dispatch(tf);
+    
+        current->tf = otf;
+        if (!in_kernel) {
+            if (current->flags & PF_EXITING) {
+                do_exit(-E_KILLED);
+            }
+            if (current->need_resched) {
+                schedule();
+            }
+        }
+    }
+}
+
+
+基于当前的代码，3rd是需要被切换出去的，在schedule函数中，
+会挑选出3rd作为调度对象（此时 initproc不会被选中，因为他正处于PROC_SLEEPING状态）
+
+        if (next != current) {
+            proc_run(next);
+        }
+        else
+        {
+            cprintf("[schedule] next == current");
+        }
+
+        所以next和current都是指 3rd，退出，不会真正去调度
+        
+
+--------------------------------------------------------------
+--------------------------------------------------------------
+--------------------------------------------------------------
+
+
+badarg
+
+
+截止到lab5，并没有实现用户态的fork-exec组合，只是实现了 fork
+
+
+
+调试
+b kern_init
+b do_execve
+c
+断到do_execve时，添加断点
+b sys_fork
+断到sys_fork时，添加断点
+b do_wait
+
+c
+
+b forkret
+
+
+
+(gdb) print_proc_list &proc_list 
+proc_list: 0xc01aa1d8
+le: 0xc038a2a0              proc: 0xc038a248
+le: 0xc038a170              proc: 0xc038a118
+le: 0xc038a0e8              proc: 0xc038a090
+proc_list: 0xc01aa1d8
+
+
+
+
+
+(gdb) p/x stack
+$1 = 0xafffff20
+
+
+
+
+    
+    
+A 调用fork 生成了 B  
+A中fork的返回值，是B的pid，是记录在eax中的
+
+fork时，do_fork中调用了 copy_thread，里面将B的eax置为了 0，
+
+那么A调用fork返回时    ，拿到的就是B的pid
+B生成后，从A的返回指令处开始执行，（应该是从A调用fork触发 int指令的下一句汇编指令开始执行），拿到的返回值，自然是自己的eax，也就是0
+    
+    
+    
+    
+copy_thread(struct proc_struct *proc, uintptr_t esp, struct trapframe *tf) {
+    proc->tf = (struct trapframe *)(proc->kstack + KSTACKSIZE) - 1;
+    *(proc->tf) = *tf;
+    proc->tf->tf_regs.reg_eax = 0;
+    proc->tf->tf_esp = esp;
+    proc->tf->tf_eflags |= FL_IF;
+
+    proc->context.eip = (uintptr_t)forkret;
+    proc->context.esp = (uintptr_t)(proc->tf);
+}   
+    
+    
+    
+    
+    实质任何函数调用都只会返回一次，父进程是返回，而子进程只是从父进程的返回指令处开始执行。
+    
+    
+
+
+
+【Q】验证上面的说法
+
+在源代码copy_thread中， proc->tf->tf_regs.reg_eax = 0;
+决定了B的返回值是 0， 也就是fork后对应B来说，“返回值”是0，（此处并不是真正的函数调用返回，是从A调用fork触发 int指令的下一句汇编指令开始执行 ）
+所以 if ((pid = fork()) == 0) 这个就是 B的运行分支
+代码运行结果可以证明。
+
+【A】
+现在将copy_thread中的 代码修改为：
+
+proc->tf->tf_regs.reg_eax = 0xfaeb;//0;
+
+其余不变
+
+用户程序代码修改为
+
+if ((pid = fork()) == 0xfaeb) {
+        cprintf("[pid:%d]fork fate-pid: %p.\n", getpid(), pid);
+
+运行时 打印的是 [pid:3]fork fate-pid: 0xfaeb.
+
+但是也可以看到的是，用过 getpid获取到的肯定还是真正的pid，这是在内核中分配好的。不受外界控制
+
+-----------
+
+A fork B，完成后，
+
+
+c
+b do_fork
+c
+b forkret
+
+
+forkret---》forkrets---》__trapret
+最后到 iret执行前 
+(gdb) i r esp
+esp            0xc03a4fec       0xc03a4fec
+(gdb) p/x *((int*)(0xc03a4fec))
+$1 = 0x8001d5
+(gdb) i r eax
+eax            0x0      0   
+    
+此前已经执行了popa，所以eax也是 0，这是B的返回值
+
+当是“现在将copy_thread中的 代码修改为：
+
+proc->tf->tf_regs.reg_eax = 0xfaeb;”
+时，此时
+eax肯定是  0xfaeb
+这样执行iret后，返回值和返回地址都有了
+
+zx@zx:~/2019/00_OS/02_ucore/labs/lab5$ objdump -d obj/__user_badarg.out  |grep 8001d5 -C 40
+
+0080018d <syscall>:
+  80018d:       55                      push   %ebp
+  80018e:       89 e5                   mov    %esp,%ebp
+
+  8001d0:       8b 45 08                mov    0x8(%ebp),%eax
+  8001d3:       cd 80                   int    $0x80
+  8001d5:       89 45 ec                mov    %eax,-0x14(%ebp)
+
+返回地址就是 是从A调用fork触发 int指令的下一句汇编指令开始执行
+
+---------------
+
+
+++ setup timer interrupts
+[schedule] current: 0xc038a008, current->need_resched: 1
+
+proc_run: 0xc038a090 [name:init  pid:1]
+[schedule] current: 0xc038a090, current->need_resched: 0
+
+
+proc_run: 0xc038a118 [name:      pid:2]
+kernel_execve: pid = 2, name = "badarg".
+user_main: name = "badarg", binary = "0xc012bb28", size = "30893"
+[pid:2]pid addr: 0xafffff8c
+[pid:2]exit_code addr: 0xafffff88
+[pid:2]pid: 3
+[pid:2]wait_ret1: -2
+[pid:2]wait_ret2: -3
+[schedule] current: 0xc038a118, current->need_resched: 0
+
+
+proc_run: 0xc038a248 [name:      pid:3]
+[pid:3]fork ok.
+current: 0xc038a248, current->need_resched: 0
+[schedule] current: 0xc038a248, current->need_resched: 1
+[schedule] next == current
+current: 0xc038a248, current->need_resched: 0
+[schedule] current: 0xc038a248, current->need_resched: 1
+[schedule] next == current
+
+[schedule] current: 0xc038a248, current->need_resched: 1
+[schedule] next == current
+[schedule] current: 0xc038a248, current->need_resched: 0
+
+
+proc_run: 0xc038a118 [name:badarg        pid:2]
+[pid:2]wait_ret3: 0
+[pid:2]badarg pass.
+[schedule] current: 0xc038a118, current->need_resched: 0
+
+
+
+
+proc_run: 0xc038a090 [name:init  pid:1]
+[schedule] current: 0xc038a090, current->need_resched: 0
+[schedule] next == current
+all user-mode processes have quit.
+init check memory pass.
+kernel panic at kern/process/proc.c:473:
+    initproc exit.
+
+
+
+    
+同前面分析的用户测试程序一样，仅仅使用fork后，只是把子进程创建出来了    
+如果没有调度到子进程，那么是无法触发 forkret---》forkrets---》__trapret
+这样的话，子进程是不会运行的
+
+此时会运行3rd，3rd进行各种操作
+包括进行waitpid操作
+“
+proc_run: 0xc038a118 [name:      pid:2]
+kernel_execve: pid = 2, name = "badarg".
+user_main: name = "badarg", binary = "0xc012bb28", size = "30893"
+[pid:2]pid addr: 0xafffff8c
+[pid:2]exit_code addr: 0xafffff88
+[pid:2]pid: 3
+[pid:2]wait_ret1: -2
+[pid:2]wait_ret2: -3
+”
+
+执行下面两次waitpid时，会出错，导致不会真正去wait
+wait_ret1 = waitpid(-1, NULL); ---》return -E_BAD_PROC;
+wait_ret2 = waitpid(pid, (void *)0xC0000000);  ----》 return -E_INVAL;   
+
+执行下面waitpid时，会进行sched
+wait_ret3 = waitpid(pid, &exit_code); 触发3rd去wait，这样会sched到 4th  
+分析切换到4th    switch_to
+
+执行ret前
+
+    pushl 0(%eax)               # push eip
+
+    ret
+
+(gdb) i r esp
+esp            0xc03a4fb0       0xc03a4fb0
+(gdb) p/x *((int*)(0xc03a4fb0))
+$4 = 0xc0109d44
+    
+esp所指内存存储的就是ret后的返回地址，就是forkret
+
+zx@zx:~/2019/00_OS/02_ucore/labs/lab5$ objdump -d bin/kernel  |grep c0109d44 -C 20
+
+c0109d44 <forkret>:
+c0109d44:       55                      push   %ebp
+c0109d45:       89 e5                   mov    %esp,%ebp
+
+【！】这和上面测试用例的讨论是一样的
+会调用forkret，这样会进行4th的运行
+
+-------------
+
+根据上面的讨论，
+forkret---》forkrets---》__trapret
+最后到 iret执行前 
+(gdb) i r esp
+esp            0xc03a4fec       0xc03a4fec
+(gdb) p/x *((int*)(0xc03a4fec))
+$1 = 0x8001d5
+(gdb) i r eax
+eax            0x0      0   
+    
+zx@zx:~/2019/00_OS/02_ucore/labs/lab5$ objdump -d obj/__user_badarg.out  |grep 8001d5 -C 40
+
+0080018d <syscall>:
+  80018d:       55                      push   %ebp
+  80018e:       89 e5                   mov    %esp,%ebp
+
+  8001d0:       8b 45 08                mov    0x8(%ebp),%eax
+  8001d3:       cd 80                   int    $0x80
+  8001d5:       89 45 ec                mov    %eax,-0x14(%ebp) 
+
+
+【！】按照上面的讨论，会从 A调用fork触发 int指令的下一句汇编指令开始执行
+这样父子进程，都从 这个地址返回了
+只是带的返回值是不一样的。
+
+
+【！！！】fork
+https://www.zhihu.com/question/24173190
+（1）
+对A来说，fork就是函数调用，肯定会有一个返回值，
+只是通过系统调用执行的，内核会分配一个pid给创建的进程，这个就作为返回值，放到eax中，进行 int 时就从eax中拿到这个值了
+
+asm volatile (
+        "int %1;"
+        : "=a" (ret)
+        : "i" (T_SYSCALL),
+....
+        : "cc", "memory");
+        
+（2）
+这样，系统调用fork可以认为已经结束了
+此时的状态是，A调用fork结束，拿到了返回值，可通过判断返回值，查看是否创建成功，以及创建的子进程的pid
+然后进行后续的操作
+新创建的B，此时，内核空间和线性地址都已经准备好了，但是此时还没有被调度到，还无法运行。
+
+（3）
+对新创建的B来说，fork实际上是克隆了一个和父进程在内核数据结构和线性地址空间上完全一样的子进程，
+
+在copy_thread(struct proc_struct *proc, uintptr_t esp, struct trapframe *tf) {
+    proc->tf = (struct trapframe *)(proc->kstack + KSTACKSIZE) - 1;
+    *(proc->tf) = *tf;
+中，完全复制了A的tf，那么也会和A有一样的 cs/eip
+对A来说，cs/eip 是fork系统调用后的返回地址，那么B也会从这个地址返回，
+一般这个地址就是 从A调用fork触发 int指令的下一句汇编指令
+A和B都会从这个地址返回
+
+但是copy_thread中
+
+    proc->tf->tf_regs.reg_eax = 0;//0xfaeb;//0;//for badarg test
+
+这样，就将B的eax赋值成了 0（也可以赋值成0xfaeb等进行测试）
+
+在 forkret---》forkrets---》__trapret
+最后到 iret执行前 已经执行了popa，所以此处的eax会被pop到 eax寄存器中
+作为子进程的返回值，那么子进程“从fork返回后”，返回值就是0，和A 的返回地址是一样的。
+
+（4）
+随后，A通过执行waitpid，将自己设置为 PROC_SLEEPING和 WT_CHILD，
+随后进行重新调度，这样就调度到B了，B才能开始运行
+
+【！！！】
+fork后，父进程从int后一条指令返回，返回子进程的pid。
+子进程是被创建出来的，并没有“从fork返回”这么一说，只是子进程生成后，拷贝了父进程的内核空间，
+所以也拷贝了父进程的返回地址，那么子进程执行时，就从父进程的返回地址开始执行的，所以感觉就像是从fork返回的。
+
+fork出来子进程之后，子进程并不会马上运行
+调度到子进程时，才运行，通过swatch_to的ret指令 先触发forkret，然后 forkret---》forkrets---》__trapret
+iret后，就会从父进程的返回地址开始执行
+
+
+底层考虑是rax寄存器存储返回值，fork实际上是克隆了一个和父进程在内核数据结构和线性地址空间上完全一样的子进程，因此pc也是从父进程的fork调用开始，因此主观上展现出了两个返回值，实际上还是一个返回值的。
+综上，父进程和子进程都要执行，返回值也不一样，所以fork()API表现为一次调用两次返回，但实质任何函数调用都只会返回一次，父进程是返回，而子进程只是从父进程的返回指令处开始执行
+
+
+3rd 与 4th 的切换
+
+proc_run: 0xc038a118 [name:      pid:2]
+kernel_execve: pid = 2, name = "badarg".
+user_main: name = "badarg", binary = "0xc012bb28", size = "30893"
+[pid:2]pid addr: 0xafffff8c
+[pid:2]exit_code addr: 0xafffff88
+[pid:2]pid: 3
+[pid:2]wait_ret1: -2
+[pid:2]wait_ret2: -3
+[schedule] current: 0xc038a118, current->need_resched: 0    
+wait_ret3 = waitpid(pid, &exit_code);    ---> schedule
+    
+    
+                                                                                    proc_run: 0xc038a248 [name:      pid:3]
+                                                                                    [pid:3]fork ok.
+                                                                                    current: 0xc038a248, current->need_resched: 0
+                                                                                    [schedule] current: 0xc038a248, current->need_resched: 1
+                                                                                    [schedule] next == current
+
+                                                                                    [schedule] current: 0xc038a248, current->need_resched: 1
+                                                                                    [schedule] next == current
+                                                                                    [schedule] current: 0xc038a248, current->need_resched: 0    
+                                                                                    exit(0xbeaf)   ---> schedule 
+    
+proc_run: 0xc038a118 [name:badarg        pid:2]
+[pid:2]wait_ret3: 0
+[pid:2]badarg pass.
+[schedule] current: 0xc038a118, current->need_resched: 0    
+
+
+
+
+
+4th执行exit分析
+schedule ---》 switch_to
+ret之前
+(gdb) i r esp
+esp            0xc0393e1c       0xc0393e1c
+(gdb) p/x *((int*)(0xc0393e1c))
+$10 = 0xc0109d37
+zx@zx:~/2019/00_OS/02_ucore/labs/lab5$ objdump -d bin/kernel  |grep c0109d37 -C 100
+
+c0109ca8 <proc_run>:
+
+c0109d32:       e8 9d 15 00 00          call   c010b2d4 <switch_to>
+c0109d37:       8b 45 ec                mov    -0x14(%ebp),%eax
+
+(gdb) s
+proc_run (proc=0xc038a248) at kern/process/proc.c:224
+(gdb) bt
+#0  proc_run (proc=0xc038a248) at kern/process/proc.c:224
+#1  0xc010b4a6 in schedule () at kern/schedule/sched.c:50
+#2  0xc010ada2 in do_wait (pid=3, code_store=0xafffff88) at kern/process/proc.c:753
+#3  0xc010b53d in sys_wait (arg=0xc0393f14) at kern/syscall/syscall.c:26
+#4  0xc010b667 in syscall () at kern/syscall/syscall.c:93
+#5  0xc0102961 in trap_dispatch (tf=0xc0393fb4) at kern/trap/trap.c:226
+#6  0xc0102b93 in trap (tf=0xc0393fb4) at kern/trap/trap.c:319
+#7  0xc0102be8 in __alltraps () at kern/trap/trapentry.S:24
+#8  0xc0393fb4 in ?? ()
+Backtrace stopped: previous frame inner to this frame (corrupt stack?)
+
+此时，会从3rd的do_wait处的schedule返回，也就是从4th返回3rd
+3rd继续执行的就是 do_wait (pid=3, code_store=0xafffff88)
+也就是用户通过系统调用触发的 wait_ret3 = waitpid(pid, &exit_code);
+(gdb) p/x current
+$11 = 0xc038a118
+
+do_wait继续执行，goto repeat;
+重新执行，由于4th在调用exit时已经将自身置为了PROC_ZOMBIE，所以 goto found;
+那么就可以清理掉4th的剩余的内存，记录4th的返回码
+
+
+
+
+继续
+
+3rd退出
+3rd使用do_exit退出
+切换到initproc
+(gdb) i r esp
+esp            0xc038cf10       0xc038cf10
+(gdb) p/x *((int*)(0xc038cf10))
+$22 = 0xc0109d37    
+注意切换回来后，都是需要执行 0xc0109d37，因为都是使用 proc_run---》switch_to切换出去的，切换回来后，自然是执行下一条指令
+(gdb) s
+proc_run (proc=0xc038a118) at kern/process/proc.c:224
+(gdb) bt
+#0  proc_run (proc=0xc038a118) at kern/process/proc.c:224
+#1  0xc010b4a6 in schedule () at kern/schedule/sched.c:50
+#2  0xc010ada2 in do_wait (pid=0, code_store=0x0) at kern/process/proc.c:753
+#3  0xc010afe6 in init_main (arg=0x0) at kern/process/proc.c:866
+#4  0xc01096af in kernel_thread_entry () at kern/process/entry.S:6
+
+
+
+
+
+
+
+--------------------------------------------------------------
+--------------------------------------------------------------
+--------------------------------------------------------------
+
+
+exit
+
+
+++ setup timer interrupts
+[schedule] current: 0xc038a008, current->need_resched: 1
+
+proc_run: 0xc038a090 [name:init  pid:1]
+[schedule] current: 0xc038a090, current->need_resched: 0
+
+proc_run: 0xc038a118 [name:      pid:2]
+kernel_execve: pid = 2, name = "exit".
+user_main: name = "exit", binary = "0xc0142585", size = "30917"
+[pid:2]I am the parent. Forking the child...
+[pid:2]I am parent, fork a child pid 3
+[pid:2]I am the parent, waiting now..
+[schedule] current: 0xc038a118, current->need_resched: 0
+
+proc_run: 0xc038a248 [name:      pid:3]
+[pid:3]I am the child.
+current: 0xc038a248, current->need_resched: 0
+[schedule] current: 0xc038a248, current->need_resched: 1
+[schedule] next == current
+
+[schedule] current: 0xc038a248, current->need_resched: 1
+[schedule] next == current
+[schedule] current: 0xc038a248, current->need_resched: 0
+
+proc_run: 0xc038a118 [name:exit  pid:2]
+[pid:2]wait_ret0: 0
+[pid:2]wait_ret1: -2
+[pid:2]wait_ret2: -2
+[pid:2]waitpid 3 ok.
+[pid:2]exit pass.
+[schedule] current: 0xc038a118, current->need_resched: 0
+
+proc_run: 0xc038a090 [name:init  pid:1]
+[schedule] current: 0xc038a090, current->need_resched: 0
+[schedule] next == current
+all user-mode processes have quit.
+init check memory pass.
+kernel panic at kern/process/proc.c:473:
+    initproc exit.
+
+
+
+
+
+（1）
+wait_ret0 = waitpid(pid, &code);
+cprintf("[pid:%d]wait_ret0: %d\n", getpid(), wait_ret0);
+assert(wait_ret0 == 0 && code == magic);
+第一次waitpid，3rd等待4th，4th开始运行自己的代码，也就是 if ((pid = fork()) == 0)分支
+运行完后，使用exit退出，3rd继续运行
+打印[pid:2]wait_ret0: 0 这句
+
+waitpid成功，返回0
+此时4th，已经完全被释放了
+
+
+（2）
+wait_ret1 = waitpid(pid, &code);
+cprintf("[pid:%d]wait_ret1: %d\n", getpid(), wait_ret1);
+
+所以在 do_wait中，find_proc(pid);返回NULL
+
+return -E_BAD_PROC;
+
+（3）
+wait_ret2 = wait();
+cprintf("[pid:%d]wait_ret2: %d\n", getpid(), wait_ret2);
+assert(wait_ret1 != 0 && wait_ret2 != 0);
+    
+也就是 waitpid(0
+(gdb) p/x current 
+$6 = 0xc038a118
+(gdb) p/x current->cptr
+$7 = 0x0
+
+所以do_wait中else的for循环进不去
+return -E_BAD_PROC;
+
+
+
+--------------------------------------------------------------
+--------------------------------------------------------------
+--------------------------------------------------------------
+
+
+spin
+
+3rd调用 kill(pid)
+
+assert((ret = kill(pid)) == 0);
+
+do_kill(int pid) {
+    struct proc_struct *proc;
+    if ((proc = find_proc(pid)) != NULL) {
+        if (!(proc->flags & PF_EXITING)) {                  y
+            proc->flags |= PF_EXITING;                      y
+            if (proc->wait_state & WT_INTERRUPTED) {        n
+                wakeup_proc(proc);                          n
+            }
+            return 0;                                       y
+        }
+        return -E_KILLED;
+    }
+    return -E_INVAL;
+}
+
+4th的flags设置了 PF_EXITING
+
+
+trap(struct trapframe *tf) {
+    // dispatch based on what type of trap occurred
+    // used for previous projects
+    if (current == NULL) {
+        trap_dispatch(tf);
+    }
+    else {
+        // keep a trapframe chain in stack
+        struct trapframe *otf = current->tf;
+        current->tf = tf;
+    
+        bool in_kernel = trap_in_kernel(tf);
+    
+        trap_dispatch(tf);                                  do_kill
+    
+        current->tf = otf;
+        if (!in_kernel) {
+            if (current->flags & PF_EXITING) {              n
+                do_exit(-E_KILLED);                         n
+            }
+            if (current->need_resched) {                    n
+                schedule();                                 n
+            }
+        }
+    }
+}
+此时，current是3rd，并不是4th
+因为是3rd触发了 kill(pid)
+(gdb) p/x current
+$2 = 0xc038a118
+
+此时调用 kill(pid)的中断返回，返回值就是do_kill的返回值。
+
+打印 [pid:2]kill returns 0
+
+
+--------
+
+然后3rd 调用 waitpid
+
+
+
+
+
+
+
+
+__trapret:
+iret执行之前
+(gdb) i r esp
+esp            0xc03a4fec       0xc03a4fec
+(gdb) p/x *((int*)0xc03a4fec)
+$6 = 0x800fd4
+
+zx@zx:~/2019/00_OS/02_ucore/labs/lab5$ objdump -d obj/__user_spin.out |grep 800fd4 -C 30
+
+00800f91 <main>:
+
+  800fcf:       e8 44 f1 ff ff          call   800118 <cprintf>
+  800fd4:       eb fe                   jmp    800fd4 <main+0x43>
+
+对应的就是 while(1) 代码
+
+
+
+
+
+(gdb) b trap.c:324
+Breakpoint 4 at 0xc0102bb3: file kern/trap/trap.c, line 324.
+(gdb) n
+(gdb) 
+(gdb) 
+(gdb) 
+(gdb) 
+
+Breakpoint 4, trap (tf=0xc03a4fb4) at kern/trap/trap.c:324
+(gdb) bt
+#0  trap (tf=0xc03a4fb4) at kern/trap/trap.c:324
+#1  0xc0102be8 in __alltraps () at kern/trap/trapentry.S:24
+#2  0xc03a4fb4 in ?? ()
+Backtrace stopped: previous frame inner to this frame (corrupt stack?)
+(gdb) p/x tf->tf_trapno
+$2 = 0x20
+(gdb) p/x *tf
+$3 = {tf_regs = {reg_edi = 0x0, reg_esi = 0x0, reg_ebp = 0xafffffa8, reg_oesp = 0xc03a4fd4, reg_ebx = 0x0, reg_edx = 0x801436, reg_ecx = 0xaffffec8, reg_eax = 0x24}, tf_gs = 0x0, tf_padding0 = 0x0, tf_fs = 0x0,
+tf_padding1 = 0x0, tf_es = 0x23, tf_padding2 = 0x0, tf_ds = 0x23, tf_padding3 = 0x0, tf_trapno = 0x20, tf_err = 0x0, tf_eip = 0x800fd4, tf_cs = 0x1b, tf_padding4 = 0x0, tf_eflags = 0x282, tf_esp = 0xafffff80, tf
+_ss = 0x23, tf_padding5 = 0x0}
+(gdb) p ticks
+$4 = 302
+(gdb) p/x current 
+$5 = 0xc038a248
+
+
+
+
+注意：每一次tick时均会引起 定时器中断
+触发 trap   trap_dispatch   case IRQ_OFFSET + IRQ_TIMER:
+
+3rd调度运行，执行fork
+打印
+yield()     
+            ---------------------------------------》   4th开始第一次执行
+                                                        forkret...
+                                                        打印
+                                                        while(1)...
+                                                        某次tick时，进入4th：trap(!)---》4th：trap_dispatch
+                                                        此次tick将到达整百ticks数
+                                                        进入if (ticks % TICK_NUM == 0)
+                                                        打印，将4th->need_resched置为1
+                                                        退出4th：trap_dispatch
+                                                        会进入4th：trap(!) if (!in_kernel)
+                                                        不进入         if (4th->flags & PF_EXITING)
+                                                        进入          if (4th->need_resched)
+            《---------------------------------------    proc_run 《----  schedule                                    
+yield()                                                     
+            ---------------------------------------》                                            
+                                                        从proc_run 退出，回到schedule
+                                                        然后从4th：trap(!)中退出
+                                                        继续执行 while(1)...    （注1）
+                                                        某次tick时，进入4th：trap(!)---》4th：trap_dispatch
+                                                        此次tick将到达整百ticks数
+                                                        进入if (ticks % TICK_NUM == 0)
+                                                        打印，将4th->need_resched置为1
+                                                        退出4th：trap_dispatch
+                                                        会进入4th：trap(!) if (!in_kernel)
+                                                        不进入         if (4th->flags & PF_EXITING)
+                                                        进入          if (4th->need_resched)
+            《---------------------------------------    proc_run 《----  schedule                                    
+yield()                                                     
+            ---------------------------------------》                        
+                                                        从proc_run 退出，回到schedule
+                                                        然后从4th：trap(!)中退出
+                                                        继续执行 while(1)...    （注1）
+                                                        某次tick时，进入4th：trap(!)---》4th：trap_dispatch
+                                                        此次tick将到达整百ticks数
+                                                        进入if (ticks % TICK_NUM == 0)
+                                                        打印，将4th->need_resched置为1
+                                                        退出4th：trap_dispatch
+                                                        会进入4th：trap(!) if (!in_kernel)
+                                                        不进入         if (4th->flags & PF_EXITING)
+                                                        进入          if (4th->need_resched)
+            《---------------------------------------    proc_run 《----  schedule                                                        
+打印                                                      
+kill(4th)
+进入3rd：trap(!)---》3rd：trap_dispatch
+进入do_kill
+4th置上PF_EXITING
+退出do_kill  ---》3rd：trap_dispatch
+返回3rd：trap(!)调用 3rd：trap_dispatch的下一句
+进入 3rd：trap(!) if (!in_kernel)
+不进入         if (3rd->flags & PF_EXITING)
+不进入     if (3rd->need_resched)
+退出3rd：trap(!) 
+退出到 __trapret
+返回到用户空间（注2），结束kill系统调用
+
+waitpid(4th)
+进入3rd：trap(!)---》3rd：trap_dispatch
+进入do_wait(!)
+进入if (haskid) 分支
+将3rd设置为 PROC_SLEEPING WT_CHILD
+schedule---》proc_run  ------------------------------》
+                                                        从proc_run 退出，回到schedule
+                                                        然后从4th：trap(!)中退出
+                                                        继续执行 while(1)...    （注1）
+                                                        下一次tick时，进入4th：trap(!)---》4th：trap_dispatch
+                                                        不一定是整百的ticks
+                                                        退出4th：trap_dispatch
+                                                        会进入4th：trap(!) if (!in_kernel)
+                                                        3rd中执行kill(4th)时， 4th已经置上PF_EXITING
+                                                        所以会进入   if (4th->flags & PF_EXITING)
+                                                        执行 do_exit(-E_KILLED);
+                                                        在do_exit中，会清除4th的mm
+                                                        置4th 为 PROC_ZOMBIE，和error_code
+                                                        将4th的parent，也就是3rd执行 wakeup
+                                                        （3rd在自己调用do_wait时已经置为了PROC_SLEEPING WT_CHILD）
+                                                        wakeup后，置为PROC_RUNNABLE，清除WT_CHILD
+            《---------------------------------------    proc_run 《----  do_exit：schedule                                                        
+从proc_run 退出，回到schedule
+回到do_wait(!)
+返回到repeat:
+在上面4th执行do_exit时，
+已经设置为 PROC_ZOMBIE
+所以找到4th
+进入found:
+继续销毁4th，4th彻底不存在了
+do_wait(!)返回
+依次返回sys_wait  syscall  3rd：trap_dispatch
+最后回到 3rd：trap(!)调用 3rd：trap_dispatch的下一句
+进入 3rd：trap(!) if (!in_kernel)
+不进入         if (3rd->flags & PF_EXITING)
+不进入     if (3rd->need_resched)
+退出3rd：trap(!) 
+退出到 __trapret
+返回到用户空间（注2），结束waitpid系统调用
+
+
+
+
+
+注1
+__trapret:
+iret执行之前
+(gdb) i r esp
+esp            0xc03a4fec       0xc03a4fec
+(gdb) p/x *((int*)0xc03a4fec)
+$6 = 0x800fd4
+
+zx@zx:~/2019/00_OS/02_ucore/labs/lab5$ objdump -d obj/__user_spin.out |grep 800fd4 -C 30
+
+00800f91 <main>:
+
+  800fcf:       e8 44 f1 ff ff          call   800118 <cprintf>
+  800fd4:       eb fe                   jmp    800fd4 <main+0x43>
+
+对应的就是 while(1) 代码
+
+
+
+
+
+
+注2
+__trapret:
+iret执行之前
+
+(gdb) i r esp
+esp            0xc0393fec       0xc0393fec
+(gdb) p/x *((int*)0xc0393fec)
+$8 = 0x8001d5
+
+zx@zx:~/2019/00_OS/02_ucore/labs/lab5$ objdump -d obj/__user_badarg.out  |grep 8001d5 -C 40
+
+0080018d <syscall>:
+  80018d:       55                      push   %ebp
+  80018e:       89 e5                   mov    %esp,%ebp
+
+  8001d0:       8b 45 08                mov    0x8(%ebp),%eax
+  8001d3:       cd 80                   int    $0x80
+  8001d5:       89 45 ec                mov    %eax,-0x14(%ebp) 
+
+对应的是调用中断（调用系统）命令的语句的下一条，就从系统调用中返回到用户空间了
+
+
+                                                                                                        
+----------------------------------------------------------------------------------------------------------------
+
+
+注意：每一次tick时均会引起 定时器中断
+触发 trap   trap_dispatch   case IRQ_OFFSET + IRQ_TIMER:
+
+3rd调度运行，执行fork
+打印
+yield()
+进入3rd：trap(!)---》3rd：trap_dispatch
+将3rd->need_resched置为1
+退出yield()
+依次返回sys_yield  syscall  3rd：trap_dispatch
+最后回到 3rd：trap(!)调用 3rd：trap_dispatch的下一句
+进入 3rd：trap(!) if (!in_kernel)
+不进入         if (3rd->flags & PF_EXITING)
+进入      if (3rd->need_resched)  
+schedule ---》 proc_run
+            ---------------------------------------》   4th开始第一次执行
+                                                        forkret...
+                                                        打印
+                                                        while(1)...
+                                                        某次tick时，进入4th：trap(!)---》4th：trap_dispatch
+                                                        此次tick将到达整百ticks数
+                                                        进入if (ticks % TICK_NUM == 0)
+                                                        打印，将4th->need_resched置为1
+                                                        退出4th：trap_dispatch
+                                                        会进入4th：trap(!) if (!in_kernel)
+                                                        不进入         if (4th->flags & PF_EXITING)
+                                                        进入          if (4th->need_resched)
+            《---------------------------------------    proc_run 《----  schedule                                    
+从proc_run 退出，回到schedule
+返回到 3rd：trap(!) 
+退出到 __trapret
+返回到用户空间（注2），结束yield系统调用
+
+yield()
+进入3rd：trap(!)---》3rd：trap_dispatch
+将3rd->need_resched置为1
+退出yield()
+依次返回sys_yield  syscall  3rd：trap_dispatch
+最后回到 3rd：trap(!)调用 3rd：trap_dispatch的下一句
+进入 3rd：trap(!) if (!in_kernel)
+不进入         if (3rd->flags & PF_EXITING)
+进入          if (3rd->need_resched)  
+schedule ---》 proc_run                                                      
+            ---------------------------------------》                                            
+                                                        从proc_run 退出，回到schedule
+                                                        然后从4th：trap(!)中退出
+                                                        继续执行 while(1)...    （注1）
+                                                        某次tick时，进入4th：trap(!)---》4th：trap_dispatch
+                                                        此次tick将到达整百ticks数
+                                                        进入if (ticks % TICK_NUM == 0)
+                                                        打印，将4th->need_resched置为1
+                                                        退出4th：trap_dispatch
+                                                        会进入4th：trap(!) if (!in_kernel)
+                                                        不进入         if (4th->flags & PF_EXITING)
+                                                        进入          if (4th->need_resched)
+            《---------------------------------------    proc_run 《----  schedule                                    
+从proc_run 退出，回到schedule
+返回到 3rd：trap(!) 
+退出到 __trapret
+返回到用户空间（注2），结束yield系统调用
+            
+yield()
+进入3rd：trap(!)---》3rd：trap_dispatch
+将3rd->need_resched置为1
+退出yield()
+依次返回sys_yield  syscall  3rd：trap_dispatch
+最后回到 3rd：trap(!)调用 3rd：trap_dispatch的下一句
+进入 3rd：trap(!) if (!in_kernel)
+不进入         if (3rd->flags & PF_EXITING)
+进入          if (3rd->need_resched)  
+schedule ---》 proc_run                                                          
+            ---------------------------------------》                        
+                                                        从proc_run 退出，回到schedule
+                                                        然后从4th：trap(!)中退出
+                                                        继续执行 while(1)...    （注1）
+                                                        某次tick时，进入4th：trap(!)---》4th：trap_dispatch
+                                                        此次tick将到达整百ticks数
+                                                        进入if (ticks % TICK_NUM == 0)
+                                                        打印，将4th->need_resched置为1
+                                                        退出4th：trap_dispatch
+                                                        会进入4th：trap(!) if (!in_kernel)
+                                                        不进入         if (4th->flags & PF_EXITING)
+                                                        进入          if (4th->need_resched)
+            《---------------------------------------    proc_run 《----  schedule                                                        
+打印                                                      
+kill(4th)
+进入3rd：trap(!)---》3rd：trap_dispatch
+进入do_kill
+4th置上PF_EXITING
+退出do_kill  ---》3rd：trap_dispatch
+返回3rd：trap(!)调用 3rd：trap_dispatch的下一句
+进入 3rd：trap(!) if (!in_kernel)
+不进入         if (3rd->flags & PF_EXITING)
+不进入     if (3rd->need_resched)
+退出3rd：trap(!) 
+退出到 __trapret
+返回到用户空间（注2），结束kill系统调用
+
+waitpid(4th)
+进入3rd：trap(!)---》3rd：trap_dispatch
+进入do_wait(!)
+进入if (haskid) 分支
+将3rd设置为 PROC_SLEEPING WT_CHILD
+schedule---》proc_run  ------------------------------》
+                                                        从proc_run 退出，回到schedule
+                                                        然后从4th：trap(!)中退出
+                                                        继续执行 while(1)...    （注1）
+                                                        下一次tick时（！！！），进入4th：trap(!)---》4th：trap_dispatch
+                                                        不一定是整百的ticks
+                                                        退出4th：trap_dispatch
+                                                        会进入4th：trap(!) if (!in_kernel)
+                                                        3rd中执行kill(4th)时， 4th已经置上PF_EXITING
+                                                        所以会进入   if (4th->flags & PF_EXITING)
+                                                        执行 do_exit(-E_KILLED);
+                                                        在do_exit中，会清除4th的mm
+                                                        置4th 为 PROC_ZOMBIE，和error_code
+                                                        将4th的parent，也就是3rd执行 wakeup
+                                                        （3rd在自己调用do_wait时已经置为了PROC_SLEEPING WT_CHILD）
+                                                        wakeup后，置为PROC_RUNNABLE，清除WT_CHILD
+            《---------------------------------------    proc_run 《----  do_exit：schedule                                                        
+从proc_run 退出，回到schedule
+回到do_wait(!)
+返回到repeat:
+在上面4th执行do_exit时，
+已经设置为 PROC_ZOMBIE
+所以找到4th
+进入found:
+继续销毁4th，4th彻底不存在了
+do_wait(!)返回
+依次返回sys_wait  syscall  3rd：trap_dispatch
+最后回到 3rd：trap(!)调用 3rd：trap_dispatch的下一句
+进入 3rd：trap(!) if (!in_kernel)
+不进入         if (3rd->flags & PF_EXITING)
+不进入     if (3rd->need_resched)
+退出3rd：trap(!) 
+退出到 __trapret
+返回到用户空间（注2），结束waitpid系统调用
+
+
+                                                        
+                                                        
+                                                        
+
+
+注1
+__trapret:
+iret执行之前
+(gdb) i r esp
+esp            0xc03a4fec       0xc03a4fec
+(gdb) p/x *((int*)0xc03a4fec)
+$6 = 0x800fd4
+
+zx@zx:~/2019/00_OS/02_ucore/labs/lab5$ objdump -d obj/__user_spin.out |grep 800fd4 -C 30
+
+00800f91 <main>:
+
+  800fcf:       e8 44 f1 ff ff          call   800118 <cprintf>
+  800fd4:       eb fe                   jmp    800fd4 <main+0x43>
+
+对应的就是 while(1) 代码
+
+
+
+
+
+
+注2
+__trapret:
+iret执行之前
+
+(gdb) i r esp
+esp            0xc0393fec       0xc0393fec
+(gdb) p/x *((int*)0xc0393fec)
+$8 = 0x8001d5
+
+zx@zx:~/2019/00_OS/02_ucore/labs/lab5$ objdump -d obj/__user_badarg.out  |grep 8001d5 -C 40
+
+0080018d <syscall>:
+  80018d:       55                      push   %ebp
+  80018e:       89 e5                   mov    %esp,%ebp
+
+  8001d0:       8b 45 08                mov    0x8(%ebp),%eax
+  8001d3:       cd 80                   int    $0x80
+  8001d5:       89 45 ec                mov    %eax,-0x14(%ebp) 
+
+对应的是调用中断（调用系统）命令的语句的下一条，就从系统调用中返回到用户空间了
+
+
+                                                        
+
+
+
+
+
+
+
+【总结】
+
+
+trap_in_kernel(struct trapframe *tf) {
+    return (tf->tf_cs == (uint16_t)KERNEL_CS);
+}
+
+void
+trap(struct trapframe *tf) {
+    // dispatch based on what type of trap occurred
+    // used for previous projects
+    if (current == NULL) {
+        trap_dispatch(tf);
+    }
+    else {
+        // keep a trapframe chain in stack
+        struct trapframe *otf = current->tf;
+        current->tf = tf;
+    
+        bool in_kernel = trap_in_kernel(tf);
+    
+        trap_dispatch(tf);
+    
+        current->tf = otf;
+        if (!in_kernel) {
+            if (current->flags & PF_EXITING) {
+                do_exit(-E_KILLED);
+            }
+            if (current->need_resched) {
+                schedule();
+            }
+        }
+    }
+}
+
+
+
+中断发生时，cpu会自动压入 一组寄存器 {[ss esp |] eflags | cs eip}
+以及利用汇编代码压入其他的一些寄存器，
+这些都作为trapframe，以保存现场环境，用于将来恢复被打断的程序继续执行
+
+当调用中断服务例程trap时，这些压入的寄存器值，又可以作为trap函数的入参，即struct trapframe tf
+当trap函数中，判断是否 in_kernel时，
+利用压入的tf_cs进行判断，中断发生时，是否是在内核上下文，还是用户上下文？
+所以就看中断发生时，到底是位于什么上下文了
+比如用户态时进行了系统调用fork wait kill exit yield等，就处于用户上下文，不再内核中
+如果是在用户进程执行时，发生了定时器中断，那么就任务是用户上下文
+如果是在内核进程执行时，发生了缺页中断，那么就处于内核上下文中（？【Q】缺页验证）
+如果是在内核进程执行时，发生了定时器中断，那么就任务是（？【Q】改造initproc加while(1)进行验证）
+
+
+当发生用户上下文中断时，就需要判断是否要执行 do_exit（该进程被执行kill后      进入该分支）
+和 schedule（时间片用完     自己执行do_yield放弃cpu      进入该分支）
+
+
+
+
+
+当使用wait时，如果父进程有子进程，而且子进程不是僵尸进程，那么父进程就要让出cpu进行等待；
+此时重新调度，（可能）回到子进程，直到子进程结束后，
+再次调度，从而（可能）再回到父进程，
+父进程重新检查子进程，发现子进程是僵尸进程，那么就销毁子进程，退出wait操作。
+
+理解的时候，一定要注意上下文，到底是在谁的上下文中进行了操作。
+
+
+yield 自己让出cpu，与其他进程无关
+exit  自己退出，内部唤醒父进程
+kill wait 自己去杀掉或者等待参数中指定的进程，关联到俩进程
+fork  自己去生成一个子进程，子进程号不确定，过程中指定
+timer 当前谁在运行，就是谁要被调度出去
+
+
+
+schedule到别人后，又再次schedule回来时，会回到之前schedule的地方，继续执行，就像没有发生切换一样
+要牢牢抓住这一点进行理解
+
+
+
+--------------------------------------------------------------
+--------------------------------------------------------------
+--------------------------------------------------------------
+
+
+waitkill
+
+
+
