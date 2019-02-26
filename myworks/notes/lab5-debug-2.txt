@@ -1006,6 +1006,11 @@ schedule ---》 proc_run
                                                         不进入         if (4th->flags & PF_EXITING)
                                                         进入          if (4th->need_resched)
             《---------------------------------------    proc_run 《----  schedule                                                        
+从proc_run 退出，回到schedule
+返回到 3rd：trap(!) 
+退出到 __trapret
+返回到用户空间（注2），结束yield系统调用
+
 打印                                                      
 kill(4th)
 进入3rd：trap(!)---》3rd：trap_dispatch
