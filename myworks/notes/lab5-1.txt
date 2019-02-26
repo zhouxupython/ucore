@@ -1,0 +1,418 @@
+
+lab5
+1. 
+……
++ cc user/hello.c
+
+gcc -Iuser/ -fno-builtin -Wall -ggdb -m32 -gstabs -nostdinc  -fno-stack-protector -Ilibs/ -Iuser/include/ -Iuser/libs/ -c user/hello.c -o obj/user/hello.o
+
+ld -m    elf_i386 -nostdlib -T tools/user.ld -o obj/__user_hello.out  obj/user/libs/initcode.o obj/user/libs/panic.o obj/user/libs/stdio.o obj/user/libs/syscall.o obj/user/libs/ulib.o obj/user/libs/umain.o  obj/libs/hash.o obj/libs/printfmt.o obj/libs/rand.o obj/libs/string.o obj/user/hello.o
+……
+ld -m    elf_i386 -nostdlib -T tools/kernel.ld -o bin/kernel  obj/kern/init/entry.o obj/kern/init/init.o …… -b binary …… obj/__user_hello.out
+……
+
+-------------------------------------------------------------
+
+                gcc
+user/hello.c  ---> obj/user/hello.o
+
+
+使用 tools/user.ld，用户进程入口地址在tools/user.ld中规定，是 initcode:_start
+地址在 0x00800020（虚拟，3G以下，用户空间）
+                                                                                    ld tools/user.ld
+obj/user/hello.o + obj/user/libs/initcode.o + obj/user/libs/... + obj/libs/...   -------------------->   obj/__user_hello.out
+
+
+initcode:_start ---》 umain ---》 main()   这样看，这个main其实就是一个普通函数而已了
+
+挂了hello，怎么挂其他的？也就是说这个main到底是哪个 c文件生成的main呢？
+
+
+-------------------------------------------------------------
+
+                                        ld tools/kernel.ld
+obj/__user_hello.out + obj/kern/...    ---------------------->  bin/kernel
+
+
+把hello应用程序的执行码obj/__user_hello.out连接在了ucore kernel的末尾。
+
+
+
+
+
+2. 
+
+// kernel_execve - do SYS_exec syscall to exec a user program called by user_main kernel_thread
+    static int
+    kernel_execve(const char *name, unsigned char *binary, size_t size) {
+    int ret, len = strlen(name);
+    asm volatile (
+        "int %1;"
+        : "=a" (ret)
+        : "i" (T_SYSCALL), "0" (SYS_exec), "d" (name), "c" (len), "b" (binary), "D" (size)
+        : "memory");
+    return ret;
+   }
+
+    #define __KERNEL_EXECVE(name, binary, size) ({                          \
+            cprintf("kernel_execve: pid = %d, name = \"%s\".\n",        \
+                    current->pid, name);                                \
+            kernel_execve(name, binary, (size_t)(size));                \
+        })
+
+    #define KERNEL_EXECVE(x) ({                                             \
+            extern unsigned char _binary_obj___user_##x##_out_start[],  \
+                _binary_obj___user_##x##_out_size[];                    \
+            __KERNEL_EXECVE(#x, _binary_obj___user_##x##_out_start,     \
+                            _binary_obj___user_##x##_out_size);         \
+        })
+……
+// user_main - the second kernel thread used to create kswapd_main & user_main kernel threads
+static int
+user_main(void *arg) {
+    #ifdef TEST
+    KERNEL_EXECVE2(TEST, TESTSTART, TESTSIZE);
+    #else
+    KERNEL_EXECVE(hello);
+    #endif
+    panic("kernel_execve failed.\n");
+    return 0;
+}
+
+
+对于上述代码，我们需要从后向前按照函数/宏的实现一个一个来分析。Initproc的执行主体是init_main函数，这个函数在缺省情况下是执行宏KERNEL_EXECVE(hello)，而这个宏最终是调用kernel_execve函数
+
+
+asm volatile (
+        "int %1;"
+        : "=a" (ret)            0在输出阶段是eax， 赋给 ret
+        : "i" (T_SYSCALL), "0" (SYS_exec), "d" (name), "c" (len), "b" (binary), "D" (size)    1   0  2  3  4  5
+        : "memory");
+
+
+1就是 "i" (T_SYSCALL)，中断类型是T_SYSCALL，也就是系统调用
+0在输入阶段也是eax "0" (SYS_exec)，系统调用类型是SYS_exec
+2 edx
+3 ecx
+4 ebx
+5 edi
+
+void
+syscall(void) {
+    struct trapframe *tf = current->tf;
+    uint32_t arg[5];
+    int num = tf->tf_regs.reg_eax;          SYS_exec
+    if (num >= 0 && num < NUM_SYSCALLS) {
+        if (syscalls[num] != NULL) {
+            arg[0] = tf->tf_regs.reg_edx;   name
+            arg[1] = tf->tf_regs.reg_ecx;   len
+            arg[2] = tf->tf_regs.reg_ebx;   binary
+            arg[3] = tf->tf_regs.reg_edi;   size
+            arg[4] = tf->tf_regs.reg_esi;   unused in sys_exec
+            tf->tf_regs.reg_eax = syscalls[num](arg);
+            return ;
+        }
+    }
+    print_trapframe(tf);
+    panic("undefined syscall %d, pid = %d, name = %s.\n",
+            num, current->pid, current->name);
+
+            
+static int
+sys_exec(uint32_t arg[]) {
+    const char *name = (const char *)arg[0];
+    size_t len = (size_t)arg[1];
+    unsigned char *binary = (unsigned char *)arg[2];
+    size_t size = (size_t)arg[3];
+    return do_execve(name, len, binary, size);
+}
+
+
+
+static int (*syscalls[])(uint32_t arg[]) = {
+    [SYS_exit]              sys_exit,
+    [SYS_fork]              sys_fork,
+    [SYS_wait]              sys_wait,
+    [SYS_exec]              sys_exec,
+    [SYS_yield]             sys_yield,
+    [SYS_kill]              sys_kill,
+    [SYS_getpid]            sys_getpid,
+    [SYS_putc]              sys_putc,
+    [SYS_pgdir]             sys_pgdir,
+};
+
+
+do_execve  ---》 load_icode
+
+此时，还是在中断服务例程的执行过程中。
+
+
+    /* LAB5:EXERCISE1 YOUR CODE
+     * should set tf_cs,tf_ds,tf_es,tf_ss,tf_esp,tf_eip,tf_eflags
+     * NOTICE: If we set trapframe correctly, then the user level process can return to USER MODE from kernel. So
+     *          tf_cs should be USER_CS segment (see memlayout.h)
+     *          tf_ds=tf_es=tf_ss should be USER_DS segment
+     *          tf_esp should be the top addr of user stack (USTACKTOP)
+     *          tf_eip should be the entry point of this binary program (elf->e_entry)
+     *          tf_eflags should be set to enable computer to produce Interrupt
+     */
+
+tf_eip = the entry point of this binary program (elf->e_entry)
+
+
+这些注释对应的代码是在给trapfram赋值，
+在中断服务例程结束后，保存的栈也弹出后，会执行iret指令
+此时会将栈中cs/eip中的记录 pop到 eip寄存器中
+从而转到栈中 eip 所指的入口地址处运行
+
+所以可以将tf_eip 赋值为 elf->e_entry， 也就是用户进程的入口地址，从而执行用户程序
+此处就是 _start(见上面tools/user.ld将用户程序的入口地址配置成 _start，也就是initcode:_start )
+从而可以进一步执行到 hello的main函数，这样就可以在这个用户进程中运行hello程序了
+
+
+
+至此，用户进程的用户环境已经搭建完毕。
+此时initproc将按产生系统调用的函数调用路径原路返回，执行中断返回指令“iret”（位于trapentry.S的最后一句）后，
+将切换到用户进程hello的第一条语句位置_start处（位于user/libs/initcode.S的第三句）开始执行。
+
+
+
+
+
+
+
+4. 
+badarg.c:fork--->syscall.c:sys_fork--->syscall.c:syscall--->(int T_SYSCALL)(eax SYS_abc)
+
+--->vector128(vectors.S)-->alltraps(trapentry.S)-->trap(trap.c)-->trap_dispatch(trap.c)--->syscall(kern/syscall.c)
+--->syscalls[num](arg) (kern/syscall.c)--->sys_abc(arg)  (kern/syscall.c)--->do_abc (kern/proc.c)
+
+-----
+user/libs:
+syscall(int num, ...) {
+
+    asm volatile (
+        "int %1;"
+        : "=a" (ret)
+        : "i" (T_SYSCALL),
+          "a" (num),
+          "d" (a[0]),
+          "c" (a[1]),
+          "b" (a[2]),
+          "D" (a[3]),
+          "S" (a[4])
+        : "cc", "memory");
+    return ret;
+}
+系统调用的参数存入 把系统调用号放到eax, 其他5个参数a[0]~a[4]分别保存到 edx ecx ebx edi esi
+-----
+
+vector128(vectors.S)
+
+.globl vector128
+vector128:
+  pushl $0
+  pushl $128
+  jmp __alltraps
+
+由于是系统调用，那么肯定是从用户态切换到了内核态，
+那么，esp和 ss寄存器的值也肯定由cpu压入栈了。
+
+struct trapframe {
+    ......
+    uintptr_t tf_eip;
+    uint16_t tf_cs;
+    uint16_t tf_padding4;
+    uint32_t tf_eflags;
+    /* below here only when crossing rings, such as from user to kernel */
+    uintptr_t tf_esp;
+    uint16_t tf_ss;
+    uint16_t tf_padding5;
+} __attribute__((packed));
+
+
+
+-----
+
+__alltraps(trapentry.S)     各种push操作，将包括上述存储参数的寄存器入栈，构造一个trapframe
+
+这一步就是保存执行系统调用前的执行现场，即把与用户进程继续执行所需的相关寄存器等当前内容保存到当前进程的中断帧trapframe中
+
+-----
+trap(struct trapframe *tf) 
+
+-----
+trap_dispatch(struct trapframe *tf) 
+
+-----
+kern：
+syscall()
+
+struct trapframe *tf = current->tf;
+（注意，在创建进程是，把进程的trapframe放在给进程的内核栈分配的空间的顶部）
+
+    int num = tf->tf_regs.reg_eax;
+    if (num >= 0 && num < NUM_SYSCALLS) {
+        if (syscalls[num] != NULL) {
+            arg[0] = tf->tf_regs.reg_edx;
+            arg[1] = tf->tf_regs.reg_ecx;
+            arg[2] = tf->tf_regs.reg_ebx;
+            arg[3] = tf->tf_regs.reg_edi;
+            arg[4] = tf->tf_regs.reg_esi;
+            tf->tf_regs.reg_eax = syscalls[num](arg);
+
+系统调用的结果存入 tf->tf_regs.reg_eax中，用于调用结束后返回给eax寄存器
+
+-----
+各级函数逐层退出，直到
+
+__alltraps 开始各种pop操作，恢复执行现场操作
+其实就是把trapframe的一部分内容保存到寄存器内容。
+
+从而也能把调用结果恢复到eax寄存器中。
+
+恢复寄存器内容结束后，调整内核堆栈指针到中断帧的tf_eip处，
+
+这时执行“IRET”指令后，CPU根据内核栈的情况回复到用户态，并把EIP指向tf_eip的值，即“INT T_SYSCALL”后的那条指令。
+这样整个系统调用就执行完毕了。
+（tf_esp和 tf_ss的值也会恢复到寄存器中，表示从内核态返回到了用户态）
+
+
+
+
+5.
+exit & wait
+exit
+1. exit执行时，先释放用户进程的mm相关的
+包括：
+（1）调用exit_mmap函数释放current->mm->vma链表中每个vma描述的进程合法空间中实际分配的内存，然后把对应的页表项内容清空，最后还把页表所占用的空间释放并把对应的页目录表项清空；
+（2）调用put_pgdir函数释放当前进程的页目录所占的内存；
+（3）调用mm_destroy函数释放mm中的vma所占内存，最后释放mm所占内存；
+设置current->mm为NULL，
+
+2. 设置当前进程的执行状态current->state=PROC_ZOMBIE，当前进程的退出码current->exit_code=error_code
+此时当前进程已经不能被调度了，需要此进程的父进程来做最后的回收工作（即回收描述此进程的内核栈和进程控制块）
+
+只有设置了PROC_ZOMBIE，才能在do_wait中将该进程进行最终回收工作
+
+3. 如果当前进程的父进程current->parent处于等待子进程状态：
+current->parent->wait_state==WT_CHILD，
+则唤醒父进程（即执行“wakup_proc(current->parent)”），让父进程帮助自己完成最后的资源回收；
+
+4. 如果当前进程还有子进程，则需要把这些子进程的父进程指针设置为内核线程initproc，且各个子进程指针需要插入到initproc的子进程链表中。
+如果某个子进程的执行状态是PROC_ZOMBIE，则需要唤醒initproc来完成对此子进程的最后回收工作。
+因为如果该进程退出后，其无法帮助自己的子进程的去释放一些资源，那么就要将这些子进程挂在initproc的子进程链表上，
+作为initproc的子进程，在这些没有爹的子进程退出时，由initproc帮助释放最后一部分资源。
+
+5. 执行schedule()函数，选择新的进程执行。
+
+
+
+
+wait
+1. pid != 0 说明确实要找指定的pid的子进程
+使用find_proc去找，找到 而且 确实是当前进程的子进程，则haskid置为1，
+（估计只有父进程才能完成对子进程的最后回收工作，或者是initproc（估计该子进程的父进程已经退出了，子进程由initproc认养）） 
+如果找到的这个子进程的状态为 PROC_ZOMBIE，那么就表明此子进程处于退出状态，需要当前进程（即子进程的父进程）完成对子进程的最终回收工作，
+即首先把子进程控制块从两个进程队列proc_list和hash_list中删除，并释放子进程的内核堆栈和进程控制块。
+自此，子进程才彻底地结束了它的执行过程，消除了它所占用的所有资源。
+
+2. 如果pid == 0，那么找任意一个处于退出状态的当前进程的子进程
+遍历当前进程的子进程，如果有子进程，那么haskid置为1，
+第一个处于PROC_ZOMBIE状态的子进程，进行释放，和上面释放方式一样。
+
+3. 如果进入 if (haskid) 代码，则说明 上面两种pid找到的子进程 均不处于 PROC_ZOMBIE状态，
+也就是表明此子进程还没有退出，不能释放。
+则当前进程只好设置自己的执行状态为PROC_SLEEPING，睡眠原因为WT_CHILD（即等待子进程退出），
+调用schedule()函数选择新的进程执行，自己睡眠等待，
+如果被唤醒，则重复跳回步骤1或者2重新执行；
+
+4. 如果也没有进入if (haskid) ，那么haskid是0，
+对于方式1，说明find_proc没有找到对应的pid号的进程，或者找到的进程不是当前进程的子进程，不能由当前进程释放其资源
+对于方式2，说明当前进程没有子进程
+那么就认为进程有问题，返回 -E_BAD_PROC
+
+
+
+
+发现有处于 PROC_ZOMBIE的进程时，说明这个进程已经在do_exit中走了一遭了，
+需要“及时”的唤醒initproc或者其父进程，来完成对此子进程的最后回收工作。
+
+
+
+
+
+
+6. int
+
+user/libs:
+syscall(int num, ...) {
+
+    asm volatile (
+        "int %1;"
+        : "=a" (ret)
+        : "i" (T_SYSCALL),
+          "a" (num),
+          "d" (a[0]),
+          "c" (a[1]),
+          "b" (a[2]),
+          "D" (a[3]),
+          "S" (a[4])
+        : "cc", "memory");
+    return ret;
+}
+
+zx@kvm:~/los/ucore/ucore_os_lab/labcodes/lab5$ objdump -d obj/__user_hello.out |grep syscall -C40
+0080018d <syscall>:
+  80018d:       55                      push   %ebp
+  80018e:       89 e5                   mov    %esp,%ebp
+  800190:       57                      push   %edi
+  800191:       56                      push   %esi
+  800192:       53                      push   %ebx
+  800193:       83 ec 20                sub    $0x20,%esp
+  800196:       8d 45 0c                lea    0xc(%ebp),%eax
+  800199:       89 45 e8                mov    %eax,-0x18(%ebp)
+  80019c:       c7 45 f0 00 00 00 00    movl   $0x0,-0x10(%ebp)
+  8001a3:       eb 16                   jmp    8001bb <syscall+0x2e>
+  8001a5:       8b 45 e8                mov    -0x18(%ebp),%eax
+  8001a8:       8d 50 04                lea    0x4(%eax),%edx
+  8001ab:       89 55 e8                mov    %edx,-0x18(%ebp)
+  8001ae:       8b 10                   mov    (%eax),%edx
+  8001b0:       8b 45 f0                mov    -0x10(%ebp),%eax
+  8001b3:       89 54 85 d4             mov    %edx,-0x2c(%ebp,%eax,4)
+  8001b7:       83 45 f0 01             addl   $0x1,-0x10(%ebp)
+  8001bb:       83 7d f0 04             cmpl   $0x4,-0x10(%ebp)
+  8001bf:       7e e4                   jle    8001a5 <syscall+0x18>
+  8001c1:       8b 55 d4                mov    -0x2c(%ebp),%edx
+  8001c4:       8b 4d d8                mov    -0x28(%ebp),%ecx
+  8001c7:       8b 5d dc                mov    -0x24(%ebp),%ebx
+  8001ca:       8b 7d e0                mov    -0x20(%ebp),%edi
+  8001cd:       8b 75 e4                mov    -0x1c(%ebp),%esi
+  8001d0:       8b 45 08                mov    0x8(%ebp),%eax           ebp+8 就是arg1，即本函数中的入参int num
+  8001d3:       cd 80                   int    $0x80
+  8001d5:       89 45 ec                mov    %eax,-0x14(%ebp)         调用结果存在eax中
+  8001d8:       8b 45 ec                mov    -0x14(%ebp),%eax
+  8001db:       83 c4 20                add    $0x20,%esp
+  8001de:       5b                      pop    %ebx
+  8001df:       5e                      pop    %esi
+  8001e0:       5f                      pop    %edi
+  8001e1:       5d                      pop    %ebp
+  8001e2:       c3                      ret
+
+
+恢复寄存器内容结束后，调整内核堆栈指针到中断帧的tf_eip处，
+
+这时执行“IRET”指令后，CPU根据内核栈的情况回复到用户态，并把EIP指向tf_eip的值，即“INT T_SYSCALL”后的那条指令。
+这样整个系统调用就执行完毕了。
+（tf_esp和 tf_ss的值也会恢复到寄存器中，表示从内核态返回到了用户态）
+
+并把EIP指向tf_eip的值，即“INT T_SYSCALL”后的那条指令  
+------ 目前看，该指令应该是  0x8001d5这条指令（？？？需要实验验证，还要验证ss的值）
+
+因为这个是从用户态到内核态，然后再返回用户态的过程
+所以需要验证  ss esp      cs eip
+
+
+
+
+
