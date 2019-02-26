@@ -1,0 +1,542 @@
+
+
+lab1
+
+
+
+【Q】
+
+pmm.c:lgdt()
+
+asm volatile ("ljmp %0, $1f\n 1:\n" :: "i" (KERNEL_CS));
+
+为何要1f，这个1是个标号，为何要加f ？
+
+at&t汇编语法，用于far jump，后面的f表示前进，若是b表示back
+
+https://stackoverflow.com/questions/48095471/operating-system-kernel-assembly-meaning#
+
+
+The code is using unnamed local labels. They come in handy if you want to avoid name collision. You can only use b (back) and f (forward) with such local labels. – Jester Jan 4 '18 at 12:37
+but $1 is an immediate number,if its a label,why not 1f instead? – Christopher_sk Jan 4 '18 at 12:44
+
+That's just a syntax peculiarity of at&t far jump. – Jester Jan 4 '18 at 12:53
+
+Basically, the AT&T assembler was never designed to actually use segmentation, so anything involving segmentation is a bit clunky. Here, a long jump is implemented as an instruction taking two immediates as that's simpler to implement in the assembler for an instruction used about once in the kernel. – fuz Jan 4 '18 at 12:55
+
+
+改成下面这种，就好看出来了
+
+ljmp 0x08, $1f
+
+1:
+
+
+此处的标号
+1：  
+后面没有任何语句，即不做任何事，直接返回的
+
+
+
+
+
+
+hx：
+gdt_s.s
+
+gdt_flush:
+    jmp 0x08:.flush   ; 远跳转，0x08是代码段描述符
+              ; 远跳目的是清空流水线并串行化处理器
+.flush:
+    ret
+
+
+首先0×08是我们跳转目标段的段选择子(这个不陌生吧？)，其对应段描述符第2项。
+后面的跳转目标标号可能会让你诧异，因为它就是下一行代码。这是为何？
+当然有深意了，第一，Intel不允许直接修改段寄存器cs的值，我们只好这样通过这种方式更新cs段寄存器；
+第二，x86以后CPU所增加的指令流水线和高速缓存可能会在新的全局描述符表加载之后依旧保持之前的缓存，
+那么修改GDTR之后最安全的做法就是立即清空流水线和更新高速缓存。说的这么牛逼的样子，其实只要一句jmp跳转就能强迫CPU自动更新了，很简单吧？
+
+
+
+
+
+所以，ucore此处在更新完 gdt后，也采用了 ljmp 0x08 到cs段，肯定也是为了 清空流水线并串行化处理器
+
+
+
+
+
+
+【TR】
+
+
+装载任务状态段寄存器TR
+    在任务内发生特权级变换时堆栈也随着自动切换，外层堆栈指针保存在内层堆栈中，而内层堆栈指针存放在当前任务的TSS中。所以，在从外层向内层变换时，要访问TSS(从内层向外层转移时不需要访问TSS，而只需内层栈中保存的栈指针)。实例在进入保护模式下的临时代码段后，通过如下两条指令装载任务状态段寄存器TR，使其指向已预置好的任务的TSS：
+
+ mov ax,SelectorTSS
+ ltr ax
+
+    LTR指令是专门用于装载任务状态段寄存器TR的指令。该指令的操作数是对应TSS段描述符的选择子。
+    
+    
+    !!!!!!!!!!!!!!!!!!LTR指令从GDT中取出相应的TSS段描述符，把TSS段描述符的基地址和界限等信息装入TR的高速缓冲寄存器中。
+    
+    
+    
+
+
+
+
+
+
+------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------
+
+
+
+
+
+lab2
+
+static struct Page *
+default_alloc_pages(size_t n) {
+    assert(n > 0);
+    if (n > nr_free) {
+        return NULL;
+    }
+    struct Page *page = NULL;
+    list_entry_t *le = &free_list;
+    while ((le = list_next(le)) != &free_list) {
+        struct Page *p = le2page(le, page_link);
+        if (p->property >= n) {         // 说明这一个链表元素的内存空间满足要求，
+            page = p;
+            break;
+        }
+    }
+    if (page != NULL) {
+        list_del(&(page->page_link));   // 将这个块先整个移除链表
+        if (page->property > n) {       // 上面的 >= n 是判断是否满足分配要求，此处的 > 是判断是否需要split该链表元素的空间，大于就需要拆分，否则就肯定是等于，等于就正好，整块都分配出去，不需要拆分
+            struct Page *p = page + n;
+            p->property = page->property - n;
+            list_add(&free_list, &(p->page_link)); // 将剩余的部分重新加入链表中
+    }
+        nr_free -= n;
+        ClearPageProperty(page);
+    }
+    return page;
+}
+
+
+
+
+
+
+
+
+
+------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------
+
+lab3
+
+
+struct Page *
+pgdir_alloc_page(pde_t *pgdir, uintptr_t la, uint32_t perm) {
+    struct Page *page = alloc_page();
+    if (page != NULL) {
+        if (page_insert(pgdir, page, la, perm) != 0) {
+            free_page(page);
+            return NULL;
+        }
+        if (swap_init_ok){
+            swap_map_swappable(check_mm_struct, la, page, 0);
+            page->pra_vaddr=la;
+            assert(page_ref(page) == 1);
+            //cprintf("get No. %d  page: pra_vaddr %x, pra_link.prev %x, pra_link_next %x in pgdir_alloc_page\n", (page-pages), page->pra_vaddr,page->pra_page_link.prev, page->pra_page_link.next);
+        }
+
+    }
+
+    return page;
+}
+
+----------
+
+else {
+    /*LAB3 EXERCISE 2: YOUR CODE
+    * Now we think this pte is a  swap entry, we should load data from disk to a page with phy addr,
+    * and map the phy addr with logical addr, trigger swap manager to record the access situation of this page.
+    *
+    *  Some Useful MACROs and DEFINEs, you can use them in below implementation.
+    *  MACROs or Functions:
+    *    swap_in(mm, addr, &page) : alloc a memory page, then according to the swap entry in PTE for addr,
+    *                               find the addr of disk page, read the content of disk page into this memroy page
+    *    page_insert : build the map of phy addr of an Page with the linear addr la
+    *    swap_map_swappable : set the page swappable
+    */
+        if(swap_init_ok) {
+            struct Page *page=NULL;
+//(1) According to the mm AND addr, try to load the content of right disk page
+//    into the memory which page managed.
+//(2) According to the mm, addr AND page, setup the map of phy addr <---> logical addr
+//(3) make the page swappable.
+
+            swap_in(mm, addr, &page);
+    
+            page_insert(mm->pgdir, page, addr, perm);
+            
+            swap_map_swappable(mm, addr, page, 0);
+            page->pra_vaddr = addr;
+        }
+        else {
+            cprintf("no swap_init_ok but ptep is %x, failed\n",*ptep);
+            goto failed;
+        }
+   }
+
+
+int
+swap_in(struct mm_struct *mm, uintptr_t addr, struct Page **ptr_result)
+{
+     struct Page *result = alloc_page();
+     assert(result!=NULL);
+
+     pte_t *ptep = get_pte(mm->pgdir, addr, 0);
+     // cprintf("SWAP: load ptep %x swap entry %d to vaddr 0x%08x, page %x, No %d\n", ptep, (*ptep)>>8, addr, result, (result-pages));
+    
+     int r;
+     if ((r = swapfs_read((*ptep), result)) != 0)
+     {
+        assert(r!=0);
+     }
+     cprintf("swap_in: load disk swap entry %d with swap_page in vadr 0x%x\n", (*ptep)>>8, addr);
+     *ptr_result=result;
+     return 0;
+}
+
+
+
+
+
+mm_struct  sm_priv 链接的是 pra算法的page
+
+sm_priv->next 拿到链表第一个item，
+这个item就是Page的pra_page_link，通过le2page可以将 pra_page_link地址换算到Page地址
+
+
+(gdb) p/x (list_entry_t*)check_mm_struct->sm_priv      
+$21 = 0xc0124184
+(gdb) p/x *((list_entry_t*)check_mm_struct->sm_priv)
+$22 = {prev = 0xc012b114, next = 0xc012b134}                next是第一个item地址，也就是某Page的pra_page_link 地址
+(gdb) p/x ((struct Page *)((char *)(0xc012b134) - ((size_t)(&((struct Page *)0)->pra_page_link))))  换算Page地址
+$23 = 0xc012b120
+(gdb) p/x check_rp
+$24 = {0xc012b0e0, 0xc012b100, 0xc012b120, 0xc012b140}
+
+(gdb) p/x *((list_entry_t*)0xc012b134)
+$25 = {prev = 0xc0124184, next = 0xc012b154}
+(gdb) p/x ((struct Page *)((char *)(0xc012b154) - ((size_t)(&((struct Page *)0)->pra_page_link))))
+$26 = 0xc012b140
+
+
+(gdb) p/x *((list_entry_t*)0xc012b154)
+$27 = {prev = 0xc012b134, next = 0xc012b0f4}
+(gdb) p/x ((struct Page *)((char *)(0xc012b0f4) - ((size_t)(&((struct Page *)0)->pra_page_link))))
+$33 = 0xc012b0e0
+
+
+
+(gdb) p/x *((list_entry_t*)0xc012b0f4)
+$34 = {prev = 0xc012b154, next = 0xc012b114}
+(gdb) p/x ((struct Page *)((char *)(0xc012b114) - ((size_t)(&((struct Page *)0)->pra_page_link))))
+$35 = 0xc012b100
+
+
+(gdb) p/x *((list_entry_t*)0xc012b114)
+$36 = {prev = 0xc012b0f4, next = 0xc0124184}
+
+
+
+
+
+
+
+p/x ((struct Page *)0xc012b120)->pra_vaddr
+
+
+$3 = 0xe
+(gdb) p/x *((char*)0x2000)
+Cannot access memory at address 0x2000
+
+(gdb) p/x check_mm_struct->pgdir
+$4 = 0xc0121000
+(gdb) p/x check_mm_struct->pgdir[0]
+$5 = 0x306027                                           页表项中第一项的物理地址，也就是某个物理页的地址，里面记录了1024个pte，每个又表示一个物理页的起始地址
+(gdb) p/x (check_mm_struct->pgdir[0] + 0xc0000000)[0]
+cannot subscript something of type `unsigned int'
+(gdb) p/x (int)((check_mm_struct->pgdir[0] + 0xc0000000)[0])
+cannot subscript something of type `unsigned int'
+(gdb) p/x (int)((0xc0306000)[0])
+cannot subscript something of type `unsigned int'
+(gdb) p/x (int)((0xc0306000)[1])
+cannot subscript something of type `unsigned int'
+(gdb) x /6xw 0xc0306000                                 0x306027是物理地址，最后12比特是属性，抹掉后是0x306000，在换算到虚拟地址，代码和gdb才能认识，也就是0xc0306000
+0xc0306000:     0x00000000      0x00308067      0x00000300      0x0030a067
+0xc0306010:     0x00307067      0x00308067
+(gdb) Quit
+(gdb) Quit
+
+
+
+
+
+
+
+
+
+
+(gdb) p/x check_mm_struct->pgdir[0]
+$2 = 0x306027
+
+
+
+bad
+倒第二次之前
+(gdb) x /6xw 0xc0306000
+0xc0306000:     0x00000000      0x00308067      0x00309067      0x0030a067
+0xc0306010:     0x00307067      0x00000600
+
+最后一次之前
+(gdb) x /6xw 0xc0306000
+0xc0306000:     0x00000000      0x00308067      0x00000300      0x0030a067
+0xc0306010:     0x00307067      0x00308067
+
+
+
+
+
+
+good
+倒第二次之前
+(gdb) x /6xw 0xc0306000
+0xc0306000:     0x00000000      0x00308067      0x00309067      0x0030a067
+0xc0306010:     0x00307067      0x00000600
+
+最后一次之前
+(gdb) x /6xw 0xc0306000
+0xc0306000:     0x00000000      0x00000200      0x00309067      0x0030a067
+0xc0306010:     0x00307067      0x00308067
+
+最后一次之后
+(gdb) x /6xw 0xc0306000
+0xc0306000:     0x00000000      0x00309067      0x00000300      0x0030a067
+0xc0306010:     0x00307067      0x00308067
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------
+
+
+lab4
+
+
+
+
+
+
+
+mm数据结构是用来实现用户空间的虚存管理的，但是内核线程没有用户空间
+
+
+struct proc_struct {
+
+
+mm：
+内存管理的信息，包括内存映射列表、页表指针等。mm成员变量在lab3中用于虚存管理。
+但在实际OS中，内核线程常驻内存，不需要考虑swap page问题，
+在lab5中涉及到了用户进程，才考虑进程用户内存空间的swappage问题，mm才会发挥作用。
+所以在lab4中mm对于内核线程就没有用了，这样内核线程的proc_struct的成员变量*mm=0是合理的。
+mm里有个很重要的项pgdir，记录的是该进程使用的一级页表的物理地址。
+由于*mm=NULL，所以在proc_struct数据结构中需要有一个代替pgdir项来记录页表起始地址，这就是proc_struct数据结构中的cr3成员变量。
+
+cr3:
+cr3 保存页表的物理地址，目的就是进程切换的时候方便直接使用 lcr3实现页表切换，避免每次都根据 mm 来计算cr3。
+mm数据结构是用来实现用户空间的虚存管理的，但是内核线程没有用户空间，它执行的只是内核中的一小段代码（通常是一小段函数），所以它没有mm 结构，也就是NULL。
+当某个进程是一个普通用户态进程的时候，PCB 中的 cr3 就是 mm 中页表（pgdir）的物理地址；
+而当它是内核线程的时候，cr3 等于boot_cr3。
+而boot_cr3指向了uCore启动时建立好的内核虚拟空间的页目录表首地址。
+
+
+
+
+
+
+
+
+
+-------------------------------------
+
+switch_to
+
+prev
+
+(gdb) p/x prev->context 
+$3 = {eip = 0x0, esp = 0x0, ebx = 0x0, ecx = 0x400000, edx = 0x2, esi = 0xc030b008, edi = 0xc030b008, ebp = 0x1f8}
+
+
+
+switch_to () at kern/process/switch.S:6
+(gdb) p/x $esp
+$5 = 0xc0124f4c
+(gdb) i r esp
+esp            0xc0124f4c       0xc0124f4c
+(gdb) p/x *((int*)0xc0124f4c)
+$4 = 0xc0108dde
+
+
+
+(gdb) ni
+(gdb) 
+switch_to () at kern/process/switch.S:8
+(gdb) p/x idleproc->context.eip
+$6 = 0xc0108dde
+
+
+
+c0108d76 <proc_run>:
+c0108d76:       55                      push   %ebp
+c0108d77:       89 e5                   mov    %esp,%ebp
+c0108d79:       83 ec 28                sub    $0x28,%esp
+c0108d7c:       a1 48 90 12 c0          mov    0xc0129048,%eax
+
+c0108dd2:       89 54 24 04             mov    %edx,0x4(%esp)
+c0108dd6:       89 04 24                mov    %eax,(%esp)
+c0108dd9:       e8 6d 06 00 00          call   c010944b <switch_to>
+c0108dde:       8b 45 ec                mov    -0x14(%ebp),%eax                     0xc0108dde
+c0108de1:       89 04 24                mov    %eax,(%esp)
+c0108de4:       e8 40 fc ff ff          call   c0108a29 <__intr_restore>
+c0108de9:       c9                      leave
+c0108dea:       c3                      ret
+
+call switch_to后，把后一句指令作为返回地址压入栈，此时esp就指向这个位置
+
+
+code-addr   reg     mem-addr    mem-value   
+                        
+                                cur_ctx
+                                prev_ctx
+            esp                 0xc0108dde      switch_to ret addr
+
+
+popl 0(%eax) 这句执行后，0xc0108dde就赋给了 【eax + 0】，也就是 prev->context.eip
+            
+
+------------------------------
+
+next
+
+switch_to () at kern/process/switch.S:27
+(gdb) i r eax
+eax            0xc030b094       -1070550892
+(gdb) p/x *((int*)0xc030b094)
+$7 = 0xc0108deb                                 eip
+(gdb) ni
+switch_to () at kern/process/switch.S:29
+(gdb) i r esp
+esp            0xc030dfb0       0xc030dfb0
+(gdb) p/x *((int*)0xc030dfb0)                   eip值被压入栈
+$8 = 0xc0108deb
+
+
+
+c0108deb <forkret>:
+c0108deb:       55                      push   %ebp                                 0xc0108deb
+c0108dec:       89 e5                   mov    %esp,%ebp
+c0108dee:       83 ec 18                sub    $0x18,%esp
+c0108df1:       a1 48 90 12 c0          mov    0xc0129048,%eax
+
+
+
+proc->context.esp = (uintptr_t)(proc->tf);
+
+proc->context.eip = (uintptr_t)forkret;
+proc创建的时候，就把context.eip设置好了，
+
+在switch to函数恢复next的现场时，
+
+movl 4(%eax), %esp      这句设置了next运行时的栈esp
+
+code-addr   reg     mem-addr    mem-value   
+栈顶-tf结束处
+
+
+tf开始处   esp
+
+
+
+
+
+
+栈底
+
+
+----------
+
+pushl 0(%eax)    就把next->context.eip 压入了栈
+
+
+
+code-addr   reg     mem-addr    mem-value   
+栈顶-tf结束处
+
+
+tf开始处   
+            esp                 next->context.eip（0xc0108deb）
+
+
+
+
+
+栈底
+
+
+
+
+switch_to 执行ret后，有 pop eip， 0xc0108deb -》eip，下一步执行0xc0108deb，即 forkret
+
+
+
+
+
+所以，待next创建完毕后，如果交替切换，
+那么每次都是把自己的esp存入 自己的context.esp
+再把自己的call  <switch_to> 这一句后面的汇编指令的地址，存入自己的context.eip
+
+这样，待再次被调度时，就可以 将 
+自己的context.esp 恢复到esp，
+再将 context.eip压入栈，再pop 到 eip，从而执行 “call  <switch_to> 这一句后面的汇编指令的地址”对应的指令，
+这样栈和指令都恢复了，这样就又切换回自己了
+
+【！！！】还要注意esp的切换和恢复，栈是不同的
+
+
+
