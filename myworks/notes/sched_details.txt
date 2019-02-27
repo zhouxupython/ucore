@@ -30,7 +30,7 @@ main(void) {
 注意：每一次tick时均会引起 定时器中断
 触发 trap   trap_dispatch   case IRQ_OFFSET + IRQ_TIMER:
 
-[time-sequence]
+
 3rd                                                     4th
 3rd调度运行，执行fork
 fork系统调用
@@ -199,8 +199,52 @@ do_wait(!)返回
 
 
 
+注1
+__trapret:
+iret执行之前
+(gdb) i r esp
+esp            0xc03a4fec       0xc03a4fec
+(gdb) p/x *((int*)0xc03a4fec)
+$6 = 0x800fd4
+
+zx@zx:~/2019/00_OS/02_ucore/labs/lab5$ objdump -d obj/__user_spin.out |grep 800fd4 -C 30
+
+00800f91 <main>:
+
+  800fcf:       e8 44 f1 ff ff          call   800118 <cprintf>
+  800fd4:       eb fe                   jmp    800fd4 <main+0x43>
+
+对应的就是 while(1) 代码
 
 
+
+
+
+
+注2
+__trapret:
+iret执行之前
+
+(gdb) i r esp
+esp            0xc0393fec       0xc0393fec
+(gdb) p/x *((int*)0xc0393fec)
+$8 = 0x8001d5
+
+zx@zx:~/2019/00_OS/02_ucore/labs/lab5$ objdump -d obj/__user_badarg.out  |grep 8001d5 -C 40
+
+0080018d <syscall>:
+  80018d:       55                      push   %ebp
+  80018e:       89 e5                   mov    %esp,%ebp
+
+  8001d0:       8b 45 08                mov    0x8(%ebp),%eax
+  8001d3:       cd 80                   int    $0x80
+  8001d5:       89 45 ec                mov    %eax,-0x14(%ebp) 
+
+对应的是调用中断（调用系统）命令的语句的下一条，就从系统调用中返回到用户空间了
+
+
+
+------------------------------
 
 zx
 
@@ -223,7 +267,38 @@ int main(void) {
     return 0;
 }
 
-[time-sequence]
+++ setup timer interrupts
+[schedule] current: 0xc038a008, current->need_resched: 1
+
+proc_run: 0xc038a090 [name:init  pid:1]
+[schedule] current: 0xc038a090, current->need_resched: 0
+
+proc_run: 0xc038a118 [name:      pid:2]
+kernel_execve: pid = 2, name = "zx".
+user_main: name = "zx", binary = "0xc019cf46", size = "30889"
+[pid:2]I am the parent. Forking the child...
+[pid:2]I am the parent. Running the child...
+[schedule] current: 0xc038a118, current->need_resched: 0
+
+proc_run: 0xc038a248 [name:      pid:3]
+[pid:3]I am the child. exit
+[schedule] current: 0xc038a248, current->need_resched: 0
+
+proc_run: 0xc038a118 [name:zx    pid:2]
+[pid:2]wait returns 0
+[pid:2]zx may pass.
+[schedule] current: 0xc038a118, current->need_resched: 0
+
+proc_run: 0xc038a090 [name:init  pid:1]
+[schedule] current: 0xc038a090, current->need_resched: 0
+[schedule] next == current
+all user-mode processes have quit.
+init check memory pass.
+kernel panic at kern/process/proc.c:473:
+    initproc exit.
+    
+    
+
 3rd                                                                     4th
 
 fork系统调用
@@ -292,8 +367,72 @@ do_wait(!)返回
 
 
 
+注2
+__trapret:
+iret执行之前
+
+(gdb) i r esp
+esp            0xc0393fec       0xc0393fec
+(gdb) p/x *((int*)0xc0393fec)
+$8 = 0x8001d5
+
+zx@zx:~/2019/00_OS/02_ucore/labs/lab5$ objdump -d obj/__user_zx.out  |grep 8001d5 -C 40
+
+0080018d <syscall>:
+  80018d:       55                      push   %ebp
+  80018e:       89 e5                   mov    %esp,%ebp
+
+  8001d0:       8b 45 08                mov    0x8(%ebp),%eax
+  8001d3:       cd 80                   int    $0x80
+  8001d5:       89 45 ec                mov    %eax,-0x14(%ebp) 
+
+对应的是调用中断（调用系统）命令的语句的下一条，就从系统调用中返回到用户空间了
 
 
+
+
+注3
+分析切换到4th    switch_to
+
+执行ret前
+
+    pushl 0(%eax)               # push eip
+
+    ret
+
+(gdb) i r esp
+esp            0xc03a4fb0       0xc03a4fb0
+(gdb) p/x *((int*)(0xc03a4fb0))
+$4 = 0xc0109d44
+    
+esp所指内存存储的就是ret后的返回地址，就是forkret
+
+zx@zx:~/2019/00_OS/02_ucore/labs/lab5$ objdump -d bin/kernel  |grep c0109d44 -C 20
+
+c0109d44 <forkret>:
+c0109d44:       55                      push   %ebp
+c0109d45:       89 e5                   mov    %esp,%ebp
+
+
+
+
+注4
+(gdb) i r esp
+esp            0xc03a4fec       0xc03a4fec
+(gdb) p/x *((int*)0xc03a4fec)
+$1 = 0x8001d5
+
+zx@zx:~/2019/00_OS/02_ucore/labs/lab5$ objdump -d obj/__user_zx.out |grep 8001d5 -C 30
+
+0080018d <syscall>:
+
+  8001d3:       cd 80                   int    $0x80
+  8001d5:       89 45 ec                mov    %eax,-0x14(%ebp)
+对应的是调用中断（调用系统）命令的语句的下一条，就从系统调用中返回到用户空间了
+
+
+-------------
+-------------
 -------------
 
 trap的讨论
@@ -343,8 +482,105 @@ trap(struct trapframe *tf) {
 
 （1）如果是在用户态时进行了系统调用fork wait kill exit yield等，就处于用户上下文，不在内核中
 （2）如果是在用户进程执行时，发生了定时器中断，那么就任务是用户上下文
-（3）如果是在内核进程执行时，发生了缺页中断，那么就处于内核上下文中（？【Q】缺页验证）
-（4）如果是在内核进程执行时，发生了定时器中断，那么就任务是（？【Q】改造initproc加while(1)进行验证）
+（3）如果是在内核进程执行时，发生了缺页中断，那么就处于内核上下文中（？【Q】缺页验证【A】对的，已经验证）
+（4）如果是在用户进程执行时，发生了缺页中断，那么就处于用户上下文中（？【Q】缺页验证【A】对的，已经验证）
+（5）如果是在内核进程执行时，发生了定时器中断，那么就任务是内核上下文中（？【Q】改造initproc加while(1)进行验证【A】对的，已经验证）
+
+
+验证（3）
+(gdb) b _fifo_check_swap
+Breakpoint 3 at 0xc0107c80: file kern/mm/swap_fifo.c, line 90.
+(gdb) c
+Continuing.
+
+Breakpoint 3, _fifo_check_swap () at kern/mm/swap_fifo.c:90
+(gdb) b trap.c:210  case T_PGFLT
+Breakpoint 4 at 0xc01028a7: file kern/trap/trap.c, line 210.
+(gdb) c
+Continuing.
+
+Breakpoint 3, _fifo_check_swap () at kern/mm/swap_fifo.c:90
+(gdb) b trap.c:210
+Breakpoint 4 at 0xc01028a7: file kern/trap/trap.c, line 210.
+(gdb) c
+Continuing.
+
+Breakpoint 4, trap_dispatch (tf=0xc012ae8c) at kern/trap/trap.c:210
+(gdb) p tf->tf_cs
+$1 = 8
+(gdb) p tf->tf_ds
+$2 = 16
+
+
+
+验证（4）
+
+faultread.c
+
+cprintf("I read %8x from 0xc0392fb4-8.\n", *(unsigned int *)(0xc0392fb4 - 8));
+
+(gdb) c
+Continuing.
+
+Breakpoint 2, do_execve (name=0xc010e660 "faultread", len=9, binary=0xc0149e4a "\177ELF\001\001\001", size=30896) at kern/process/proc.c:674
+(gdb) n
+(gdb) p name
+$1 = 0xc010e660 "faultread"
+(gdb) b trap.c:210
+Breakpoint 3 at 0xc01028a7: file kern/trap/trap.c, line 210.
+(gdb) c
+Continuing.
+
+Breakpoint 3, trap_dispatch (tf=0xc0393fb4) at kern/trap/trap.c:210
+(gdb) p/x tf->tf_cs
+$4 = 0x1b
+(gdb) p/x tf->tf_ds
+$5 = 0x23
+
+所以是处于用户上下文中的中断
+
+
+验证（5）
+
+改造init_main为
+int init_main(void *arg) {
+    cprintf("enter init_main.\n");
+
+    while (1) {
+
+    }
+
+    cprintf("exit init_main.\n");
+    return 0;
+}
+
+(gdb) b init_main
+Breakpoint 3 at 0xc010af7a: file kern/process/proc.c, line 886.
+(gdb) c
+Continuing.断到init_main
+
+Breakpoint 3, init_main (arg=0x0) at kern/process/proc.c:886
+(gdb) b trap.c:246  case IRQ_OFFSET + IRQ_TIMER: 的current->need_resched = 1;时间片用完的时刻
+Breakpoint 4 at 0xc0102997: file kern/trap/trap.c, line 246.
+(gdb) c
+Continuing.
+
+Breakpoint 4, trap_dispatch (tf=0xc038bf90) at kern/trap/trap.c:246
+(gdb) p ticks
+$1 = 100
+(gdb) n
+(gdb) 
+(gdb) 
+trap (tf=0xc038bf90) at kern/trap/trap.c:321
+(gdb) p tf->tf_cs
+$2 = 8
+(gdb) p tf->tf_ds
+$3 = 16
+(gdb) n
+(gdb) 
+
+
+
 
 （二）用户上下文发生中断时，执行完中断服务例程后，哪些会执行do_exit 和 schedule？
 用户上下文中断时，执行完中断服务例程后，就需要判断是否要执行：
