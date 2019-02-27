@@ -1,0 +1,901 @@
+
+
+waitkill
+
+
+#include <ulib.h>
+#include <stdio.h>
+
+void
+yield_6times(void) {
+    yield();
+    yield();
+    yield();
+    yield();
+    yield();
+    yield();
+}
+
+int parent, pid1, pid2;
+
+void
+loop(void) {
+    cprintf("[pid:%d]child 1.\n", getpid());
+    while (1);
+}
+
+void
+work(void) {
+    cprintf("[pid:%d]child 2.\n", getpid());
+    yield_6times();
+    cprintf("[pid:%d]yield 6 over----1.\n", getpid());
+    if (kill(parent) == 0) {
+        cprintf("[pid:%d]kill parent ok.\n", getpid());
+        yield_6times();
+        cprintf("[pid:%d]yield 6 over----2.\n", getpid());
+        if (kill(pid1) == 0) {
+            cprintf("[pid:%d]kill child1 ok.\n", getpid());
+            exit(0);
+        }
+    }
+    exit(-1);
+}
+
+int
+main(void) {
+    parent = getpid();
+    cprintf("[pid:%d]parent pid: %d \n", getpid(), parent);
+    if ((pid1 = fork()) == 0) {
+        loop();
+    }
+    cprintf("[pid:%d]--------------1.\n", getpid());
+    cprintf("[pid:%d]pid1 pid: %d \n", getpid(), pid1);
+    assert(pid1 > 0);
+
+    if ((pid2 = fork()) == 0) {
+        work();
+    }
+    cprintf("[pid:%d]--------------2.\n", getpid());
+    cprintf("[pid:%d]pid2 pid: %d \n", getpid(), pid2);
+    
+    if (pid2 > 0) {
+        cprintf("[pid:%d]wait child 1.\n", getpid());
+        waitpid(pid1, NULL);
+        panic("[pid:%d]waitpid %d returns\n", getpid(), pid1);
+    }
+    else {
+        cprintf("[pid:%d]--------------3.\n", getpid());
+        kill(pid1);
+    }
+    cprintf("[pid:%d]--------------4.\n", getpid());
+    panic("FAIL: T.T\n");
+}
+
+
+
+
+
+
+++ setup timer interrupts
+[schedule] current: 0xc038a008, current->need_resched: 1
+
+proc_run: 0xc038a090 [name:init  pid:1]
+[do_wait]pid == 0 find_proc proc: 0xc038a118[pid: 2]
+[schedule] current: 0xc038a090, current->need_resched: 0
+
+proc_run: 0xc038a118 [name:      pid:2]
+kernel_execve: pid = 2, name = "waitkill".
+user_main: name = "waitkill", binary = "0xc018dd2b", size = "31087"
+[pid:2]parent pid: 2
+[pid:2]--------------1.
+[pid:2]pid1 pid: 3
+[pid:2]--------------2.
+[pid:2]pid2 pid: 4
+[pid:2]wait child 1.
+[do_wait]pid != 0 find_proc proc: 0xc038a248[pid: 3]
+[schedule] current: 0xc038a118, current->need_resched: 0
+
+proc_run: 0xc038a378 [name:      pid:4]
+[pid:4]child 2.
+[do_yield]current: 0xc038a378, current->need_resched: 0
+[schedule] current: 0xc038a378, current->need_resched: 1
+
+proc_run: 0xc038a248 [name:      pid:3]
+[pid:3]child 1.
+100 ticks
+End of Test.
+[schedule] current: 0xc038a248, current->need_resched: 1
+
+proc_run: 0xc038a378 [name:      pid:4]
+[do_yield]current: 0xc038a378, current->need_resched: 0
+[schedule] current: 0xc038a378, current->need_resched: 1
+
+proc_run: 0xc038a248 [name:      pid:3]
+100 ticks
+End of Test.
+[schedule] current: 0xc038a248, current->need_resched: 1
+
+proc_run: 0xc038a378 [name:      pid:4]
+[do_yield]current: 0xc038a378, current->need_resched: 0
+[schedule] current: 0xc038a378, current->need_resched: 1
+
+proc_run: 0xc038a248 [name:      pid:3]
+100 ticks
+End of Test.
+[schedule] current: 0xc038a248, current->need_resched: 1
+
+proc_run: 0xc038a378 [name:      pid:4]
+[do_yield]current: 0xc038a378, current->need_resched: 0
+[schedule] current: 0xc038a378, current->need_resched: 1
+
+proc_run: 0xc038a248 [name:      pid:3]
+100 ticks
+End of Test.
+[schedule] current: 0xc038a248, current->need_resched: 1
+
+proc_run: 0xc038a378 [name:      pid:4]
+[do_yield]current: 0xc038a378, current->need_resched: 0
+[schedule] current: 0xc038a378, current->need_resched: 1
+
+proc_run: 0xc038a248 [name:      pid:3]
+100 ticks
+End of Test.
+[schedule] current: 0xc038a248, current->need_resched: 1
+
+proc_run: 0xc038a378 [name:      pid:4]
+[do_yield]current: 0xc038a378, current->need_resched: 0
+[schedule] current: 0xc038a378, current->need_resched: 1
+
+proc_run: 0xc038a248 [name:      pid:3]
+100 ticks
+End of Test.
+[schedule] current: 0xc038a248, current->need_resched: 1
+
+proc_run: 0xc038a378 [name:      pid:4]
+[pid:4]yield 6 over----1.
+[pid:4]kill parent ok.
+[do_yield]current: 0xc038a378, current->need_resched: 0
+[schedule] current: 0xc038a378, current->need_resched: 1
+
+proc_run: 0xc038a248 [name:      pid:3]
+100 ticks
+End of Test.
+[schedule] current: 0xc038a248, current->need_resched: 1
+
+proc_run: 0xc038a118 [name:waitkill      pid:2]
+[do_exit]current: 0xc038a118[pid: 2]
+[schedule] current: 0xc038a118, current->need_resched: 0
+
+proc_run: 0xc038a090 [name:init  pid:1]
+[do_wait]pid == 0 find_proc proc: 0xc038a248[pid: 3]
+[do_wait]pid == 0 find_proc proc: 0xc038a378[pid: 4]
+[do_wait]pid == 0 find_proc proc: 0xc038a118[pid: 2]
+[do_wait]pid == 0 find_proc proc: 0xc038a118[pid: 2] is PROC_ZOMBIE
+[schedule] current: 0xc038a090, current->need_resched: 0
+
+proc_run: 0xc038a378 [name:      pid:4]
+[do_yield]current: 0xc038a378, current->need_resched: 0
+[schedule] current: 0xc038a378, current->need_resched: 1
+
+proc_run: 0xc038a248 [name:      pid:3]
+100 ticks
+End of Test.
+[schedule] current: 0xc038a248, current->need_resched: 1
+
+proc_run: 0xc038a090 [name:init  pid:1]
+[do_wait]pid == 0 find_proc proc: 0xc038a248[pid: 3]
+[do_wait]pid == 0 find_proc proc: 0xc038a378[pid: 4]
+[schedule] current: 0xc038a090, current->need_resched: 0
+
+proc_run: 0xc038a378 [name:      pid:4]
+[do_yield]current: 0xc038a378, current->need_resched: 0
+[schedule] current: 0xc038a378, current->need_resched: 1
+
+proc_run: 0xc038a248 [name:      pid:3]
+100 ticks
+End of Test.
+[schedule] current: 0xc038a248, current->need_resched: 1
+
+proc_run: 0xc038a378 [name:      pid:4]
+[do_yield]current: 0xc038a378, current->need_resched: 0
+[schedule] current: 0xc038a378, current->need_resched: 1
+
+proc_run: 0xc038a248 [name:      pid:3]
+100 ticks
+End of Test.
+[schedule] current: 0xc038a248, current->need_resched: 1
+
+proc_run: 0xc038a378 [name:      pid:4]
+[do_yield]current: 0xc038a378, current->need_resched: 0
+[schedule] current: 0xc038a378, current->need_resched: 1
+
+proc_run: 0xc038a248 [name:      pid:3]
+100 ticks
+End of Test.
+[schedule] current: 0xc038a248, current->need_resched: 1
+
+proc_run: 0xc038a378 [name:      pid:4]
+[do_yield]current: 0xc038a378, current->need_resched: 0
+[schedule] current: 0xc038a378, current->need_resched: 1
+
+proc_run: 0xc038a248 [name:      pid:3]
+100 ticks
+End of Test.
+[schedule] current: 0xc038a248, current->need_resched: 1
+
+proc_run: 0xc038a378 [name:      pid:4]
+[pid:4]yield 6 over----2.
+[pid:4]kill child1 ok.
+[do_exit]current: 0xc038a378[pid: 4]
+[schedule] current: 0xc038a378, current->need_resched: 0
+
+proc_run: 0xc038a248 [name:      pid:3]
+[do_exit]current: 0xc038a248[pid: 3]
+[schedule] current: 0xc038a248, current->need_resched: 0
+
+proc_run: 0xc038a090 [name:init  pid:1]
+[do_wait]pid == 0 find_proc proc: 0xc038a248[pid: 3]
+[do_wait]pid == 0 find_proc proc: 0xc038a248[pid: 3] is PROC_ZOMBIE
+[schedule] current: 0xc038a090, current->need_resched: 0
+[schedule] next == current
+[do_wait]pid == 0 find_proc proc: 0xc038a378[pid: 4]
+[do_wait]pid == 0 find_proc proc: 0xc038a378[pid: 4] is PROC_ZOMBIE
+[schedule] current: 0xc038a090, current->need_resched: 0
+[schedule] next == current
+all user-mode processes have quit.
+init check memory pass.
+[do_exit]current: 0xc038a090[pid: 1]
+kernel panic at kern/process/proc.c:474:
+    initproc exit.
+
+
+
+pid  1                          2                                       4                                   3
+                                                                        pid2                                pid1
+initproc                        p0                                      p2                                  p1
+
+调用init_main
+调用kernel_thread创造p0
+do_wait(0
+进入else分支，
+p0处于RUN状态
+进入if (haskid) 分支
+设置为PROC_SLEEPING WT_CHILD
+schedule---》proc_run  
+                ----------------》
+                            user_main
+                            KERNEL_EXECVE(waitkill)
+                            do_execve
+                            返回trap，返回__trapret:
+                            p0开始第一次执行（注5）
+                            getpid 打印
+                            
+                            p1 = fork()
+                            打印"---1."，打印p1
+                            p2 = fork()
+                            打印"---2."，打印p2
+                            【tree0】
+                            
+                            打印，执行waitpid(pid1, )
+                            进入do_wait(!)
+                            进入if (haskid) 分支
+                            将p0设置为 PROC_SLEEPING WT_CHILD
+                            schedule【sched1】---》proc_run  
+                                                        ---------------》
+                                                                p2开始第一次执行
+                                                                forkret...（注3）
+                                                                forkrets:
+                                                                __trapret:（注4）
+                                                                返回用户空间，p2完全创建好了
+                                                                可以在用户空间执行了
+                                                                p2设置了与p0：fork一样的返回地址，但返回值是0
+                                                                会执行if ( == 0)分支
+                                                                打印，然后执行work函数
+                                                                打印“child 2”
+                                                                执行yield_6times：yield-1
+                                                                schedule【sched2】---》proc_run
+                                                                                            ---------------》
+                                                                                                        p1开始第一次执行
+                                                                                                        forkret...（注3）
+                                                                                                        forkrets:
+                                                                                                        __trapret:（注4）
+                                                                                                        返回用户空间，p1完全创建好了
+                                                                                                        可以在用户空间执行了
+                                                                                                        p1设置了与p0：fork一样的返回地址，但返回值是0
+                                                                                                        会执行if ( == 0)分支，执行loop-while(1)
+                                                                                                        某次tick时，进入p1：trap(!)---》p1：trap_dispatch
+                                                                                                        此次tick将到达整百ticks数，timer超时
+                                                                                                        进入if (ticks % TICK_NUM == 0)
+                                                                                                        打印，将p1->need_resched置为1
+                                                                                                        退出p1：trap_dispatch
+                                                                                                        会进入p1：trap(!) if (!in_kernel)
+                                                                                                        不进入        if (p1->flags & PF_EXITING)
+                                                                                                        进入          if (p1->need_resched)
+                                                                                                        proc_run 《----  schedule【sched3】            
+                                                                                        《------------------                                 
+                                                                        执行yield_6times：剩余的5次yield
+                                                                                        ---------------》
+                                                                                        《------------------
+                                                                                        ................
+                                                                                        ---------------》
+                                                                                        《------------------
+
+                                                                打印“yield 6 over----1”
+                                                                p2执行kill(p0)
+                                                                【c1】
+                                                                进入do_kill
+                            PF_EXITING                          设置p0 PF_EXITING
+                            PROC_RUNNABLE                       p0已经是PROC_SLEEPING WT_CHILD，
+                            wait_state:0                        包含WT_INTERRUPTED
+                                                                所以p2执行wakeup_proc(p0)
+                                                                退出do_kill  ---》3rd：trap_dispatch
+                                                                返回p2：trap(!)调用 p2：trap_dispatch的下一句
+                                                                进入 p2：trap(!) if (!in_kernel)
+                                                                不进入     if (3rd->flags & PF_EXITING)
+                                                                不进入     if (3rd->need_resched)
+                                                                退出p2：trap(!) 
+                                                                退出到 __trapret
+                                                                返回到用户空间（注2），结束kill系统调用
+                                                                打印“kill parent ok”
+                                                                再次执行yield_6times：yield-1
+                                                                schedule【sched4】---》proc_run
+                                                                                            ---------------》
+                                                                                                        p1继续执行loop-while(1)
+                                                                                                        timer超时
+                                                                                                        proc_run 《----  schedule【sched5】
+                                《---------------------------------------------------------------------------
+                            从proc_run 退出，回到schedule
+                            回到do_wait(!) 
+                            回到if (haskid) 分支，继续执行
+                            执行该分支schedule的后一句
+                            
+                            因为p2执行kill(p0)
+                            p0->flags有PF_EXITING
+                            所以p0执行do_exit(-E_KILLED);
+                            【c2】
+                            在do_exit中，会清除p0的mm
+                            置p0 为 PROC_ZOMBIE，和error_code
+                            将p0的parent，即initproc执行 wakeup
+                            （initproc在调用do_wait时已经置为了
+                            PROC_SLEEPING WT_CHILD）
+PROC_RUNNABLE               wakeup后，initproc置为PROC_RUNNABLE，
+wait_state:0                清除WT_CHILD
+                            
+                            p0要退出了，需要将p0的子进程设置为p0的父进程的子进程
+                            过程很复杂，单独分析
+                            【tree1】【tree2】【tree3】
+                            proc_run 《----  do_exit：schedule【sched6】
+   《---------------------------
+从proc_run 退出，回到schedule
+回到do_wait(!) 
+回到if (haskid) 分支，继续执行
+执行该分支schedule的后一句                           
+没有PF_EXITING
+goto repeat
+此处是do_wait(0
+所以进入else分支，
+根据【tree3】，
+此时cur->cptr即p1
+p1不为PROC_ZOMBIE
+循环，p1->optr即p2
+p2不为PROC_ZOMBIE
+循环，p2->optr即p0
+p0执行do_exit后，为PROC_ZOMBIE
+goto found; 销毁p0
+调用remove_links重组进程tree
+【tree4】
+                
+销毁p0后【c3】，do_wait(0 返回0
+在init_main中，继续schedule
+schedule【sched7】---》proc_run  
+                           --------------------------------------------》
+                                                                执行yield_6times：yield-2
+                                                                schedule【sched8】---》proc_run
+                                                                                            ---------------》
+                                                                                                        p1继续执行loop-while(1)
+                                                                                                        timer超时
+                                                                                                        proc_run 《----  schedule【sched9】
+    《--------------------------------------------------------------------------------------------------------                      
+从proc_run 退出，回到schedule
+这是在init_main中调用的schedule
+继续执行do_wait(0
+进入else分支，
+根据【tree4】，
+此时cur->cptr即p1
+p1不为PROC_ZOMBIE
+循环，p1->optr即p2
+p2不为PROC_ZOMBIE
+退出循环
+
+进入if (haskid) 分支
+设置为PROC_SLEEPING WT_CHILD
+【c4】
+schedule【sched10】---》proc_run  
+                --------------------------------------------------------》
+                                                                执行yield_6times：剩余的4次yield
+                                                                                        ---------------》
+                                                                                        《------------------
+                                                                                        ................
+                                                                                        ---------------》
+                                                                                        《------------------
+
+                                                                打印“yield 6 over----2”
+                                                                p2执行kill(p1)
+                                                                【c5】
+                                                                进入do_kill
+                                                                设置p1 PF_EXITING                                     PF_EXITING
+                                                                因为p1是PROC_RUNNABLE，
+                                                                不执行wakeup_proc(p0)
+                                                                退出do_kill  ---》3rd：trap_dispatch
+                                                                返回p2：trap(!)调用 p2：trap_dispatch的下一句
+                                                                进入 p2：trap(!) if (!in_kernel)
+                                                                不进入     if (3rd->flags & PF_EXITING)
+                                                                不进入     if (3rd->need_resched)
+                                                                退出p2：trap(!) 
+                                                                退出到 __trapret
+                                                                返回到用户空间（注2），结束kill系统调用
+                                                                打印“kill child1 ok”
+                                                                
+                                                                p2执行exit(0)
+                                                                【c6】
+                                                                在do_exit中，会清除p2的mm
+                                                                置p2 为 PROC_ZOMBIE，和error_code
+                                                                将p2的parent，即initproc执行 wakeup
+                                                                （initproc在调用do_wait时已经置为了
+                                                                PROC_SLEEPING WT_CHILD）
+PROC_RUNNABLE                                                   wakeup后，initproc置为PROC_RUNNABLE，
+wait_state:0                                                    清除WT_CHILD
+
+                                                                p2要退出了，
+                                                                需要将p2的子进程设置为p2的父进程的子进程
+                                                                根据【tree4】，p2无子进程
+                                                                退出循环
+                                                                【tree5】
+                                                                do_exit：schedule【sched11】
+                                                                ---》proc_run
+                                                                                            ---------------------》
+                                                                                                        p1继续执行loop-while(1)
+                                                                                                        下一次tick时（！！！），
+                                                                                                        进入p1：trap(!)---》p1：trap_dispatch
+                                                                                                        不一定是整百的ticks
+                                                                                                        退出p1：trap_dispatch
+                                                                                                        会进入p1：trap(!) if (!in_kernel)
+                                                                                                        因为p2执行kill(p1)
+                                                                                                        p1->flags有PF_EXITING
+                                                                                                        所以会进入   if (p1->flags & PF_EXITING)
+                                                                                                        p1执行 do_exit(-E_KILLED);
+                                                                                                        【c7】
+                                                                                                        在do_exit中，会清除p1的mm
+                                                                                                        置p1 为 PROC_ZOMBIE，和error_code
+                                                                                                        p1的parent，即initproc，其wait_state:0
+                                                                                                        所以不执行 wakeup
+                                                                                                        
+                                                                                                        p1要退出了，
+                                                                                                        需要将p1的子进程设置为p1的父进程的子进程
+                                                                                                        根据【tree5】，p1无子进程
+                                                                                                        退出循环
+                                                                                                        【tree6】
+                                                                                                        do_exit：schedule【sched12】
+                                                                                                        proc_run 《----  
+    《------------------------------------------------------------------------------------------------------
+从proc_run 退出，回到schedule
+回到do_wait(!) 
+回到if (haskid) 分支，继续执行
+执行该分支schedule的后一句                           
+没有PF_EXITING
+goto repeat
+此处是do_wait(0
+所以进入else分支，                                                             
+                                                                
+根据【tree6】，
+此时cur->cptr即p1
+【tree7】
+p1执行do_exit后，为PROC_ZOMBIE
+goto found; 销毁p1
+调用remove_links重组进程tree
+【tree8】
+                
+销毁p1后【c8】，do_wait(0 返回0
+这是在init_main中调用的do_wait
+在init_main中，继续schedule
+schedule【sched13】
+【sched13】选择的是initproc自身，不执行proc_run
+schedule结束，
+这是在init_main中调用的schedule
+继续执行do_wait(0
+所以进入else分支，
+
+根据【tree8】，
+此时cur->cptr即p2
+【tree9】
+p2执行do_exit后，p2为PROC_ZOMBIE     
+goto found; 销毁p2
+调用remove_links重组进程tree
+【tree10】            
+                
+销毁p2后【c9】，do_wait(0 返回0
+这是在init_main中调用的do_wait
+在init_main中，继续schedule
+schedule【sched14】
+【sched14】选择的是initproc自身，不执行proc_run
+schedule结束，
+这是在init_main中调用的schedule
+继续执行do_wait(0
+所以进入else分支，             
+                
+根据【tree10】，             
+此时cur->cptr为NULL
+不进入if (haskid) 分支
+return -E_BAD_PROC;
+do_wait(0 返回 -E_BAD_PROC
+这是在init_main中调用的do_wait 
+在init_main中，退出while循环，不再执行schedule
+
+结束init_main
+回到kernel_thread_entry
+initproc执行执行do_exit         
+                
+                
+时序图结束
+----------------------------------------------                
+                
+                
+                
+调试的时候，根据需要
+b proc.c:759
+do_wait的 if (haskid)分支中 schedule()的下一行代码
+
+
+
+
+（注2）
+(gdb) i r esp
+esp            0xc03b5fec       0xc03b5fec
+(gdb) p/x *((int*)(0xc03b5fec))
+$4 = 0x8001d5
+
+对应的是调用中断（调用系统）命令的语句的下一条，就从系统调用中返回到用户空间了
+
+（注3）
+分析切换到4th    switch_to
+
+执行ret前
+
+    pushl 0(%eax)               # push eip
+
+    ret
+
+(gdb) i r esp
+esp            0xc03a4fb0       0xc03a4fb0
+(gdb) p/x *((int*)(0xc03a4fb0))
+$4 = 0xc0109d44
+    
+esp所指内存存储的就是ret后的返回地址，就是forkret
+
+zx@zx:~/2019/00_OS/02_ucore/labs/lab5$ objdump -d bin/kernel  |grep c0109d44 -C 20
+
+c0109d44 <forkret>:
+c0109d44:       55                      push   %ebp
+c0109d45:       89 e5                   mov    %esp,%ebp
+
+
+（注4）
+(gdb) i r esp
+esp            0xc03b5fec       0xc03b5fec
+(gdb) p/x *((int*)(0xc03b5fec))
+$6 = 0x8001d5
+
+zx@zx:~/2019/00_OS/02_ucore/labs/lab5$ objdump -d obj/__user_waitkill.out |grep 8001d5 -C 30
+0080018d <syscall>:
+  8001d3:       cd 80                   int    $0x80
+  8001d5:       89 45 ec                mov    %eax,-0x14(%ebp)
+对应的是调用中断（调用系统）命令的语句的下一条，就从系统调用中返回到用户空间了
+
+
+（注5）
+__trapret:
+iret返回之前
+(gdb) i r esp
+esp            0xc0393f88       0xc0393f88
+(gdb) p/x *((int*)0xc0393f88)
+$2 = 0x800020
+
+
+zx@zx:~/2019/00_OS/02_ucore/labs/lab5$ objdump -d obj/__user_waitkill.out |grep 800020 -C 30
+00800020 <_start>:
+  800020:       bd 00 00 00 00          mov    $0x0,%ebp
+  800025:       83 ec 20                sub    $0x20,%esp
+  800028:       e8 15 03 00 00          call   800342 <umain>
+
+是用户程序的入口_start
+
+_start---》umain---》waitkill的main
+
+
+---------------------
+【sched】
+CURRENT表示调度之前的上下文进程
+*表示基于调度前的CURRENT 和 其他进程的状态，选择进行调度的进程，即调度后执行该进程
+
+原理是，基于当前的CURRENT，往next也就是往后找，找一个PROC_RUNNABLE的进程，循环找
+
+
+
+【sched1】
+
+
+【proc_list头】           【p2】              【p1】                 【p0】                  【initproc】
+                                                            PROC_SLEEPING           PROC_SLEEPING
+                                                            WT_CHILD                WT_CHILD
+                                                                ||
+                        [*]                                   CURRENT
+
+
+
+
+【sched2】
+
+【proc_list头】           【p2】              【p1】                 【p0】                  【initproc】
+                                                            PROC_SLEEPING           PROC_SLEEPING
+                                                            WT_CHILD                WT_CHILD
+                         ||               [*]
+                       CURRENT
+
+
+
+【sched3】
+【proc_list头】           【p2】              【p1】                 【p0】                  【initproc】
+                                                            PROC_SLEEPING           PROC_SLEEPING
+                                                            WT_CHILD                WT_CHILD
+                        [*]                ||
+                                         CURRENT
+
+
+
+【c1】
+p2执行kill(p0)后，
+
+【proc_list头】           【p2】              【p1】                 【p0】                  【initproc】
+                                                            PF_EXITING
+                                                            PROC_RUNNABLE           PROC_SLEEPING
+                                                            0                       WT_CHILD
+                         ||
+                       CURRENT
+
+
+
+【sched4】
+
+【proc_list头】           【p2】              【p1】                 【p0】                  【initproc】
+                                                            PF_EXITING
+                                                            PROC_RUNNABLE           PROC_SLEEPING
+                                                            0                       WT_CHILD
+                         ||               [*]
+                       CURRENT
+
+
+【sched5】
+【proc_list头】           【p2】              【p1】                 【p0】                  【initproc】
+                                                            PF_EXITING
+                    PROC_RUNNABLE      PROC_RUNNABLE        PROC_RUNNABLE           PROC_SLEEPING
+                    0                  0                    0                       WT_CHILD
+                                           ||                  [*]
+                                         CURRENT
+
+
+
+
+【c2】
+p0执行do_exit(-E_KILLED)后，
+
+【proc_list头】           【p2】              【p1】                 【p0】                  【initproc】
+                                                            PF_EXITING
+                    PROC_RUNNABLE      PROC_RUNNABLE        PROC_ZOMBIE             PROC_RUNNABLE
+                    0                  0                    0                       0
+                                                                ||
+                                                              CURRENT
+
+
+【sched6】
+
+【proc_list头】           【p2】              【p1】                 【p0】                  【initproc】
+                                                            PF_EXITING
+                    PROC_RUNNABLE      PROC_RUNNABLE        PROC_ZOMBIE             PROC_RUNNABLE
+                    0                  0                    0                       0
+                                                                ||                     [*]
+                                                              CURRENT
+
+
+
+【c3】
+销毁p0时，执行了remove_links---》list_del(&(p0->list_link));
+所以链表中删除p0
+
+【proc_list头】           【p2】              【p1】                 【initproc】
+
+                    PROC_RUNNABLE      PROC_RUNNABLE           PROC_RUNNABLE
+                    0                  0                       0
+                                                                   ||
+                                                                 CURRENT
+
+
+
+【sched7】
+【proc_list头】           【p2】              【p1】                 【initproc】
+
+                    PROC_RUNNABLE      PROC_RUNNABLE           PROC_RUNNABLE
+                    0                  0                        0
+                        [*]                                        ||
+                                                                 CURRENT
+
+
+
+【sched8】
+
+【proc_list头】           【p2】              【p1】                 【initproc】
+
+                    PROC_RUNNABLE      PROC_RUNNABLE           PROC_RUNNABLE
+                    0                  0                       0
+                         ||               [*]
+                       CURRENT
+
+
+【sched9】
+【proc_list头】           【p2】              【p1】                 【initproc】
+
+                    PROC_RUNNABLE      PROC_RUNNABLE           PROC_RUNNABLE
+                    0                  0                       0
+                                           ||                      [*]
+                                         CURRENT
+
+
+
+【c4】
+
+【proc_list头】           【p2】              【p1】                 【initproc】
+
+                    PROC_RUNNABLE      PROC_RUNNABLE           PROC_SLEEPING
+                    0                  0                       WT_CHILD
+                                                                   ||
+                                                                 CURRENT
+
+
+
+【sched10】
+
+【proc_list头】           【p2】              【p1】                 【initproc】
+
+                    PROC_RUNNABLE      PROC_RUNNABLE           PROC_SLEEPING
+                    0                  0                       WT_CHILD
+                        [*]                                        ||
+                                                                 CURRENT
+
+
+
+【c5】
+p2执行kill(p1)后，
+
+【proc_list头】           【p2】              【p1】                 【initproc】
+                                       PF_EXITING
+                    PROC_RUNNABLE      PROC_RUNNABLE           PROC_SLEEPING
+                    0                  0                       WT_CHILD
+                         ||
+                       CURRENT
+
+
+
+【c6】
+p2执行kill(p1)后，
+
+【proc_list头】           【p2】              【p1】                 【initproc】
+                                       PF_EXITING
+                    PROC_ZOMBIE        PROC_RUNNABLE           PROC_RUNNABLE
+                    0                  0                       0
+                         ||
+                       CURRENT
+
+
+
+
+【sched11】
+
+【proc_list头】           【p2】              【p1】                 【initproc】
+                                       PF_EXITING
+                    PROC_ZOMBIE        PROC_RUNNABLE           PROC_RUNNABLE
+                    0                  0                       0
+                         ||               [*]
+                       CURRENT
+
+
+
+
+【c7】
+
+【proc_list头】           【p2】              【p1】                 【initproc】
+                                       PF_EXITING
+                    PROC_ZOMBIE        PROC_ZOMBIE             PROC_RUNNABLE
+                    0                  0                       0
+                                           ||
+                                         CURRENT
+
+
+
+【sched12】
+
+【proc_list头】           【p2】              【p1】                 【initproc】
+                                       PF_EXITING
+                    PROC_ZOMBIE        PROC_ZOMBIE             PROC_RUNNABLE
+                    0                  0                       0
+                                           ||                      [*]
+                                         CURRENT
+
+
+
+【c8】
+销毁p1时，执行了remove_links---》list_del(&(p1->list_link));
+所以链表中删除p1
+
+【proc_list头】           【p2】            【initproc】
+
+                    PROC_ZOMBIE         PROC_RUNNABLE
+                    0                   0
+                                            ||
+                                          CURRENT
+
+
+【sched13】
+p2是PROC_ZOMBIE，因此选择的还是initproc
+
+【proc_list头】           【p2】            【initproc】
+
+                    PROC_ZOMBIE         PROC_RUNNABLE
+                    0                   0
+                                            ||[*]
+                                          CURRENT
+
+
+【c9】
+销毁p2时，执行了remove_links---》list_del(&(p2->list_link));
+所以链表中删除p2
+
+【proc_list头】       【initproc】
+
+                    PROC_RUNNABLE
+                    0
+                        ||
+                      CURRENT
+
+
+
+【sched14】
+选择的还是initproc
+
+【proc_list头】       【initproc】
+
+                    PROC_RUNNABLE
+                    0
+                        ||[*]
+                      CURRENT
+
+
+
+
+
+
+
+
+
+
+
+                
+                     
+                     
+                     
+                     
+                     
+                     
+                     
+                     
+                     
+【tree1】【tree2】【tree3】重新分析 结合代码
+
